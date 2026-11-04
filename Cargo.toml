@@ -1,0 +1,31 @@
+[package]
+name = "soundhonter"
+version = "1.0.0"
+edition = "2021"
+description = "Convert and mix audio files from the Windows right-click menu"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "soundhonter"
+path = "src/main.rs"
+
+[dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Controls",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+embed-manifest = "1.4"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

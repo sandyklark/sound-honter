@@ -1,0 +1,167 @@
+//! Runs a whole user request, reporting progress through state shared with the UI.
+
+use crate::engine::{Engine, Failure, Format};
+use crate::queue::Runner;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+pub const NEED_TWO_FILES: &str = "Select at least two audio files to mix.";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Job {
+    Convert(Format),
+    Mix,
+}
+
+impl Job {
+    /// Identifies this job's queue. Each kind of job gathers its own selection.
+    pub fn queue_name(self) -> String {
+        match self {
+            Job::Convert(format) => format!("convert-{}", format.extension()),
+            Job::Mix => "mix".to_string(),
+        }
+    }
+}
+
+pub enum Source {
+    Files(Vec<PathBuf>),
+    Queue(Runner),
+}
+
+#[derive(Clone, Default)]
+pub struct Status {
+    pub heading: String,
+    pub detail: String,
+    pub fraction: f64,
+}
+
+#[derive(Default)]
+pub struct Shared {
+    pub cancel: Arc<AtomicBool>,
+    pub status: Mutex<Status>,
+    pub finished: AtomicBool,
+}
+
+impl Shared {
+    fn report(&self, heading: &str, detail: &str, fraction: f64) {
+        *self.status.lock().unwrap() = Status {
+            heading: heading.to_string(),
+            detail: detail.to_string(),
+            fraction,
+        };
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct Outcome {
+    pub outputs: Vec<PathBuf>,
+    /// What failed, and why.
+    pub failures: Vec<(String, String)>,
+    pub cancelled: bool,
+}
+
+impl Outcome {
+    fn record(&mut self, result: Result<PathBuf, Failure>, label: String) {
+        match result {
+            Ok(output) => self.outputs.push(output),
+            Err(Failure::Cancelled) => self.cancelled = true,
+            Err(Failure::Error(reason)) => self.failures.push((label, reason)),
+        }
+    }
+}
+
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
+struct Worker<'a> {
+    job: Job,
+    engine: Engine,
+    shared: &'a Shared,
+    outcome: Outcome,
+    converted: usize,
+}
+
+impl Worker<'_> {
+    fn handle_batch(&mut self, batch: Vec<PathBuf>) {
+        match self.job {
+            Job::Convert(format) => self.convert_all(&batch, format),
+            Job::Mix => self.mix(&batch),
+        }
+    }
+
+    fn convert_all(&mut self, batch: &[PathBuf], format: Format) {
+        // Files selected while a batch is running extend the same count.
+        let total = self.converted + batch.len();
+        for input in batch {
+            if self.shared.is_cancelled() {
+                self.outcome.cancelled = true;
+                return;
+            }
+            let heading = format!("Converting {} of {total}", self.converted + 1);
+            let name = display_name(input);
+            let finished = self.converted as f64;
+            let shared = self.shared;
+            let mut on_progress = |file_fraction: f64| {
+                shared.report(&heading, &name, (finished + file_fraction) / total as f64);
+            };
+            on_progress(0.0);
+            let result = self.engine.convert(input, format, &mut on_progress);
+            self.outcome.record(result, name);
+            self.converted += 1;
+        }
+    }
+
+    fn mix(&mut self, batch: &[PathBuf]) {
+        if batch.len() < 2 {
+            let label = batch.first().map_or_else(String::new, |p| display_name(p));
+            self.outcome
+                .failures
+                .push((label, NEED_TWO_FILES.to_string()));
+            return;
+        }
+        let heading = format!("Mixing {} files", batch.len());
+        let names: Vec<String> = batch.iter().map(|p| display_name(p)).collect();
+        let detail = names.join(", ");
+        let shared = self.shared;
+        let mut on_progress = |fraction: f64| shared.report(&heading, &detail, fraction);
+        on_progress(0.0);
+        let result = self.engine.mix(batch, &mut on_progress);
+        self.outcome.record(result, detail);
+    }
+}
+
+pub fn run(job: Job, source: Source, ffmpeg: PathBuf, shared: &Shared) -> Outcome {
+    let mut worker = Worker {
+        job,
+        engine: Engine::new(ffmpeg, shared.cancel.clone()),
+        shared,
+        outcome: Outcome::default(),
+        converted: 0,
+    };
+    match source {
+        Source::Files(files) => worker.handle_batch(files),
+        Source::Queue(mut runner) => loop {
+            // Keep draining after a cancel, so queued files aren't picked up by some later run.
+            match runner.next_batch() {
+                Ok(Some(_)) if shared.is_cancelled() => worker.outcome.cancelled = true,
+                Ok(Some(batch)) => worker.handle_batch(batch),
+                Ok(None) => break,
+                Err(error) => {
+                    let failure = ("Selection".to_string(), error.to_string());
+                    worker.outcome.failures.push(failure);
+                    break;
+                }
+            }
+        },
+    }
+    worker.outcome
+}
