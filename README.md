@@ -8,8 +8,23 @@ Right-click one or more audio files and open the **Sound Honter** submenu. On Wi
 **Show more options** first.
 
 - **Convert to MP3, WAV, FLAC, OGG or M4A:** makes a copy of each selected file in that format.
+- **Normalize loudness:** makes `take normalized.wav`, at the same loudness target as mixes.
+  Keeps the format, sample rate, channels and tags.
+- **Trim silence:** makes `take trimmed.wav`, with silence below -60 dB cut from the start and end.
+  Silence in the middle is kept.
 - **Mix selected files:** layers two or more files into one 24-bit stereo WAV, as long as the
   longest file and normalized for loudness.
+- **Mix with options...:** the same, but asks which format to save in and whether to normalize,
+  and remembers your answer. Without normalizing, a mix keeps its natural level and is turned down
+  only if it would otherwise clip.
+
+Sources that Sound Honter can read but not write, like AIFF, are normalized and trimmed to WAV.
+Sounds under 0.4 seconds are too short to measure, so they can't be normalized. Mixes of such sounds
+keep their natural level instead.
+
+Converting, normalizing and trimming keep tags like title and artist. Cover art is kept in MP3,
+FLAC and M4A; OGG and WAV can't hold it, so it's left out of those. Mixes get neither, because a
+mix isn't any one of its source files.
 
 Windows hides the submenu when more than 15 files are selected. For bigger selections, use
 **Send to > Sound Honter Mix** or **Sound Honter Convert to MP3**.

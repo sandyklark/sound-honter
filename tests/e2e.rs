@@ -897,3 +897,134 @@ fn queued_edits_handle_a_whole_selection() {
         );
     }
 }
+
+fn peak(file: &Path) -> f64 {
+    measure(&analysis(file, "volumedetect"), "max_volume:")
+}
+
+#[test]
+fn mix_can_be_saved_in_every_format() {
+    for (format, expected) in [
+        ("mp3", "Audio: mp3"),
+        ("wav", "pcm_s24le"),
+        ("flac", "Audio: flac"),
+        ("ogg", "Audio: vorbis"),
+        ("m4a", "Audio: aac"),
+    ] {
+        let scratch = Scratch::new();
+        let a = scratch.copy("blunt.wav", "a.wav");
+        let b = scratch.copy("drum.wav", "b.wav");
+        assert_success(&scratch.run(&["mix", "--format", format], &[&a, &b]));
+        let result = scratch.0.join(format!("a + b mix.{format}"));
+        let info = stream_info(&result);
+        assert!(info.contains(expected), "{format}: {info}");
+        assert!(info.contains("stereo"), "{format}: {info}");
+        assert!((duration(&result) - 1.94).abs() < 0.1, "{format}: {info}");
+    }
+}
+
+#[test]
+fn flac_mixes_are_24_bit() {
+    let scratch = Scratch::new();
+    let a = scratch.copy("blunt.wav", "a.wav");
+    let b = scratch.copy("drum.wav", "b.wav");
+    assert_success(&scratch.run(&["mix", "--format", "flac"], &[&a, &b]));
+    let info = stream_info(&scratch.0.join("a + b mix.flac"));
+    assert!(
+        info.contains("s32 (24 bit)") && info.contains("48000 Hz"),
+        "{info}"
+    );
+}
+
+#[test]
+fn unnormalized_mix_keeps_its_natural_level() {
+    let scratch = Scratch::new();
+    let a = scratch.generate("sine=220:d=4:r=48000,volume=-20dB", "a.wav");
+    let b = scratch.generate("anullsrc=r=48000:cl=mono:d=4", "b.wav");
+    assert_success(&scratch.run(&["mix", "--no-normalize"], &[&a, &b]));
+    let before = peak(&a);
+    let after = peak(&scratch.0.join("a + b mix.wav"));
+    // Spreading mono across stereo can shift the level a little, but no gain should be applied.
+    assert!((after - before).abs() < 3.5, "{before} became {after}");
+}
+
+#[test]
+fn unnormalized_mix_is_turned_down_rather_than_clipped() {
+    let scratch = Scratch::new();
+    let square = "aevalsrc='sgn(sin(2*PI*220*t))':d=2:s=48000";
+    let files: Vec<PathBuf> = (0..4)
+        .map(|i| scratch.generate(square, &format!("loud{i}.wav")))
+        .collect();
+    let refs: Vec<&Path> = files.iter().map(PathBuf::as_path).collect();
+    assert_success(&scratch.run(&["mix", "--no-normalize"], &refs));
+    let after = peak(&scratch.0.join("loud0 + 3 more mix.wav"));
+    assert!(after <= -0.8 && after > -2.0, "peak {after}");
+}
+
+#[test]
+fn mixes_of_very_short_sounds_are_not_left_too_quiet() {
+    let scratch = Scratch::new();
+    let a = scratch.generate("sine=880:d=0.1:r=48000", "a.wav");
+    let b = scratch.generate("sine=660:d=0.1:r=48000", "b.wav");
+    assert_success(&scratch.run(&["mix"], &[&a, &b]));
+    let after = peak(&scratch.0.join("a + b mix.wav"));
+    // Each tone peaks at -18 dBFS, so the sum sits a little above that. Headroom left in by
+    // mistake would put it below -30.
+    assert!(after > -18.0, "the mix came out at only {after} dBFS");
+}
+
+#[test]
+fn asking_is_skipped_without_a_ui() {
+    let scratch = Scratch::new();
+    let a = scratch.copy("blunt.wav", "a.wav");
+    let b = scratch.copy("drum.wav", "b.wav");
+    assert_success(&scratch.run(&["mix", "--ask"], &[&a, &b]));
+    assert!(scratch.0.join("a + b mix.wav").is_file());
+}
+
+#[test]
+fn normalize_works_on_flac_at_either_bit_depth() {
+    for (source_format, expected) in [("s16", "s16"), ("s32", "s32 (24 bit)")] {
+        let scratch = Scratch::new();
+        let long = scratch.generate("sine=440:d=4:r=48000", "long.wav");
+        let input = scratch.0.join("song.flac");
+        let mut command = Command::new(ffmpeg());
+        command
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(&long)
+            .args(["-sample_fmt", source_format]);
+        if source_format == "s32" {
+            command.args(["-bits_per_raw_sample", "24"]);
+        }
+        assert!(command.arg(&input).status().unwrap().success());
+
+        assert_success(&scratch.run(&["normalize"], &[&input]));
+        let info = stream_info(&scratch.0.join("song normalized.flac"));
+        assert!(info.contains(expected), "{source_format}: {info}");
+    }
+}
+
+#[test]
+fn normalize_works_on_every_format_for_clips_under_three_seconds() {
+    for format in ["mp3", "wav", "flac", "ogg", "m4a"] {
+        let scratch = Scratch::new();
+        let source = scratch.copy("blunt.wav", "blunt.wav");
+        assert_success(&scratch.run(&["convert", format], &[&source]));
+        fs::remove_file(&source).unwrap();
+        let converted = scratch.0.join(if format == "wav" {
+            "blunt (1).wav".to_string()
+        } else {
+            format!("blunt.{format}")
+        });
+
+        let output = scratch.run(&["normalize"], &[&converted]);
+        assert_success(&output);
+        let result = printed_output(&output);
+        assert!(
+            (duration(&result) - 1.52).abs() < 0.1,
+            "{format}: {}",
+            stream_info(&result)
+        );
+        assert!(peak(&result) <= -2.0, "{format}: peak {}", peak(&result));
+    }
+}

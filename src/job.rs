@@ -1,6 +1,6 @@
 //! Runs a whole user request, reporting progress through state shared with the UI.
 
-use crate::engine::{Engine, Failure, Format};
+use crate::engine::{Engine, Failure, Format, MixOptions};
 use crate::queue::Runner;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +13,7 @@ pub enum Job {
     Convert(Format),
     Normalize,
     Trim,
-    Mix,
+    Mix(MixOptions),
 }
 
 impl Job {
@@ -23,7 +23,14 @@ impl Job {
             Job::Convert(format) => format!("convert-{}", format.extension()),
             Job::Normalize => "normalize".to_string(),
             Job::Trim => "trim".to_string(),
-            Job::Mix => "mix".to_string(),
+            Job::Mix(options) => {
+                let level = if options.normalize {
+                    "normalized"
+                } else {
+                    "plain"
+                };
+                format!("mix-{}-{level}", options.format.extension())
+            }
         }
     }
 }
@@ -97,7 +104,7 @@ struct Worker<'a> {
 impl Worker<'_> {
     fn handle_batch(&mut self, batch: Vec<PathBuf>) {
         match self.job {
-            Job::Mix => self.mix(&batch),
+            Job::Mix(options) => self.mix(&batch, options),
             job => self.process_each(&batch, job),
         }
     }
@@ -127,14 +134,14 @@ impl Worker<'_> {
                 Job::Convert(format) => self.engine.convert(input, format, &mut on_progress),
                 Job::Normalize => self.engine.normalize(input, &mut on_progress),
                 Job::Trim => self.engine.trim(input, &mut on_progress),
-                Job::Mix => unreachable!("mixes are handled as a whole"),
+                Job::Mix(_) => unreachable!("mixes are handled as a whole"),
             };
             self.outcome.record(result, name);
             self.processed += 1;
         }
     }
 
-    fn mix(&mut self, batch: &[PathBuf]) {
+    fn mix(&mut self, batch: &[PathBuf], options: MixOptions) {
         if batch.len() < 2 {
             let label = batch.first().map_or_else(String::new, |p| display_name(p));
             self.outcome
@@ -148,7 +155,7 @@ impl Worker<'_> {
         let shared = self.shared;
         let mut on_progress = |fraction: f64| shared.report(&heading, &detail, fraction);
         on_progress(0.0);
-        let result = self.engine.mix(batch, &mut on_progress);
+        let result = self.engine.mix(batch, options, &mut on_progress);
         self.outcome.record(result, detail);
     }
 }

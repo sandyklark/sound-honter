@@ -4,7 +4,7 @@
 
 mod ui;
 
-use soundhonter::engine::{Engine, Format};
+use soundhonter::engine::{Engine, Format, MixOptions};
 use soundhonter::job::{self, Job, Outcome, Shared, Source};
 use soundhonter::queue;
 use std::ffi::OsString;
@@ -20,10 +20,13 @@ Usage:
   soundhonter convert <mp3|wav|flac|ogg|m4a> [--queue] [--no-ui] <files...>
   soundhonter normalize [--queue] [--no-ui] <files...>
   soundhonter trim [--queue] [--no-ui] <files...>
-  soundhonter mix [--queue] [--no-ui] <files...>
+  soundhonter mix [--format <format>] [--no-normalize] [--ask] [--queue] [--no-ui] <files...>
 
-  --queue   Gather files from separate launches into one job (used by the right-click menu)
-  --no-ui   Report on stdout and stderr instead of showing dialogs";
+  --queue         Gather files from separate launches into one job (used by the right-click menu)
+  --no-ui         Report on stdout and stderr instead of showing dialogs
+  --format        The format to save a mix in (default: wav)
+  --no-normalize  Keep a mix's natural level, turning it down only if it would clip
+  --ask           Ask how to mix, remembering the answer for next time";
 
 const EXIT_FAILED: u8 = 1;
 const EXIT_USAGE: u8 = 2;
@@ -31,17 +34,21 @@ const EXIT_USAGE: u8 = 2;
 const ID_SHOW_FILE: i32 = 1001;
 const ID_LICENSES: i32 = 1002;
 
+/// Queues `--ask` launches apart from others, since the options aren't known until after gathering.
+const ASKING_QUEUE: &str = "mix-ask";
+
 struct Request {
     job: Job,
     use_queue: bool,
     no_ui: bool,
+    ask: bool,
     files: Vec<PathBuf>,
 }
 
 fn parse_args(args: Vec<OsString>) -> Result<Request, String> {
     let mut args = args.into_iter();
     let job = match args.next().as_deref().and_then(|a| a.to_str()) {
-        Some("mix") => Job::Mix,
+        Some("mix") => Job::Mix(MixOptions::default()),
         Some("normalize") => Job::Normalize,
         Some("trim") => Job::Trim,
         Some("convert") => {
@@ -53,14 +60,36 @@ fn parse_args(args: Vec<OsString>) -> Result<Request, String> {
         Some(other) => return Err(format!("Unknown command: {other}")),
         None => return Err("Missing command.".to_string()),
     };
-    let (mut use_queue, mut no_ui, mut files) = (false, false, Vec::new());
-    for arg in args {
+    let (mut use_queue, mut no_ui, mut ask, mut files) = (false, false, false, Vec::new());
+    let mut mix_options = MixOptions::default();
+    let mut used_mix_flag = false;
+    while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--queue") => use_queue = true,
             Some("--no-ui") => no_ui = true,
+            Some("--ask") => {
+                ask = true;
+                used_mix_flag = true;
+            }
+            Some("--no-normalize") => {
+                mix_options.normalize = false;
+                used_mix_flag = true;
+            }
+            Some("--format") => {
+                let name = args.next().ok_or("--format needs a format.")?;
+                let name = name.to_string_lossy();
+                mix_options.format =
+                    Format::parse(&name).ok_or_else(|| format!("Unknown format: {name}"))?;
+                used_mix_flag = true;
+            }
             _ => files.push(PathBuf::from(arg)),
         }
     }
+    let job = match job {
+        Job::Mix(_) => Job::Mix(mix_options),
+        _ if used_mix_flag => return Err("Those options only apply to mix.".to_string()),
+        other => other,
+    };
     if files.is_empty() {
         return Err("No files were given.".to_string());
     }
@@ -73,6 +102,7 @@ fn parse_args(args: Vec<OsString>) -> Result<Request, String> {
         job,
         use_queue,
         no_ui,
+        ask,
         files,
     })
 }
@@ -119,17 +149,24 @@ fn main() -> ExitCode {
 
 fn execute(request: Request) -> ExitCode {
     let Request {
-        job,
+        mut job,
         use_queue,
         no_ui,
+        ask,
         files,
     } = request;
+    let ask = ask && !no_ui;
 
     let source = if use_queue {
         // Explorer gives each process one file, but a command line could give several.
         let mut runner = None;
+        let queue_name = if ask {
+            ASKING_QUEUE.to_string()
+        } else {
+            job.queue_name()
+        };
         for file in &files {
-            match queue::submit(&data_dir(), &job.queue_name(), file) {
+            match queue::submit(&data_dir(), &queue_name, file) {
                 Ok(claimed) => runner = runner.or(claimed),
                 Err(error) => {
                     let reason = format!("Could not queue {}: {error}", file.display());
@@ -144,6 +181,18 @@ fn execute(request: Request) -> ExitCode {
         }
     } else {
         Source::Files(files)
+    };
+
+    let source = if ask {
+        match ask_how_to_mix(source) {
+            Some((options, files)) => {
+                job = Job::Mix(options);
+                Source::Files(files)
+            }
+            None => return ExitCode::SUCCESS,
+        }
+    } else {
+        source
     };
 
     let ffmpeg = Engine::locate_ffmpeg();
@@ -170,7 +219,7 @@ fn execute(request: Request) -> ExitCode {
         Job::Convert(_) => "Converting…",
         Job::Normalize => "Normalizing…",
         Job::Trim => "Trimming…",
-        Job::Mix => "Mixing…",
+        Job::Mix(_) => "Mixing…",
     };
     ui::progress(&shared, initial_heading);
     match worker.join() {
@@ -180,6 +229,44 @@ fn execute(request: Request) -> ExitCode {
             false,
         ),
     }
+}
+
+/// Gathers the selection and asks how to mix it. Returns `None` if there's nothing left to do.
+fn ask_how_to_mix(source: Source) -> Option<(MixOptions, Vec<PathBuf>)> {
+    let mut runner = None;
+    let mut files = match source {
+        Source::Files(files) => files,
+        Source::Queue(mut queue) => {
+            let first = queue.next_batch().ok().flatten();
+            runner = Some(queue);
+            first?
+        }
+    };
+
+    // With too few files there's nothing to ask: the job itself will explain.
+    let choice = if files.len() < 2 {
+        Some(MixOptions::default())
+    } else {
+        let remembered_path = data_dir().join("mix-options.txt");
+        let remembered = fs::read_to_string(&remembered_path).unwrap_or_default();
+        let choice = ui::mix_options(files.len(), MixOptions::from_text(&remembered));
+        if let Some(options) = choice {
+            let _ = fs::write(&remembered_path, options.to_text());
+        }
+        choice
+    };
+
+    // Whatever was chosen, empty the queue so that nothing is left for some later run.
+    if let Some(queue) = &mut runner {
+        while let Ok(Some(batch)) = queue.next_batch() {
+            for file in batch {
+                if !files.contains(&file) {
+                    files.push(file);
+                }
+            }
+        }
+    }
+    choice.map(|options| (options, files))
 }
 
 fn failure_outcome(reason: String) -> Outcome {
@@ -303,7 +390,8 @@ fn show_about() {
         On Windows 11, choose \"Show more options\" first.\n\n\
         Convert: right-click one or more audio files, then choose Sound Honter and a format.\n\n\
         Normalize or trim: the same, to even out loudness or cut silence from both ends.\n\n\
-        Mix: select two or more audio files, right-click, then choose Sound Honter > Mix selected files. \
+        Mix: select two or more audio files, right-click, then choose Sound Honter > Mix selected files, \
+        or Mix with options to pick a format and whether to normalize. \
         For more than 15 files, use Send to > Sound Honter Mix.\n\n\
         New files are saved beside the originals. Nothing is ever overwritten.";
     let buttons = [(ID_LICENSES, "Licenses")];
@@ -343,9 +431,28 @@ mod tests {
         let request = parse(&["mix", "--no-ui", "C:\\a.wav", "C:\\b.wav"])
             .ok()
             .unwrap();
-        assert_eq!(request.job, Job::Mix);
+        assert_eq!(request.job, Job::Mix(MixOptions::default()));
         assert!(request.no_ui);
         assert_eq!(request.files.len(), 2);
+    }
+
+    #[test]
+    fn parses_mix_options() {
+        let args = [
+            "mix",
+            "--format",
+            "flac",
+            "--no-normalize",
+            "--ask",
+            "a.wav",
+        ];
+        let request = parse(&args).ok().unwrap();
+        let expected = MixOptions {
+            format: Format::Flac,
+            normalize: false,
+        };
+        assert_eq!(request.job, Job::Mix(expected));
+        assert!(request.ask);
     }
 
     #[test]
@@ -362,6 +469,10 @@ mod tests {
             &["convert"],
             &["convert", "exe", "a.wav"],
             &["mix"],
+            &["mix", "--format", "exe", "a.wav"],
+            &["mix", "a.wav", "--format"],
+            &["trim", "--no-normalize", "a.wav"],
+            &["convert", "mp3", "--ask", "a.wav"],
         ] {
             assert!(parse(args).is_err(), "{args:?} should be rejected");
         }

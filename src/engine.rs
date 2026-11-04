@@ -22,6 +22,8 @@ const SHORTEST_SILENCE: f64 = 0.02;
 /// How far apart two times can be and still count as the same moment, in seconds.
 /// Reported durations are estimates for some formats, so this can't be too tight.
 const TIME_TOLERANCE: f64 = 0.1;
+/// Unnormalized mixes are turned down only if their peak would pass this level, in dBFS.
+const MIX_PEAK_CEILING: f64 = -1.0;
 /// Gain applied to a mix before analysis, on top of dividing by the number of inputs.
 const MIX_HEADROOM: f64 = 0.25;
 /// How much of a mix's progress bar is the analysis pass, rather than the render pass.
@@ -96,9 +98,59 @@ impl Format {
             Format::Mp3 => vec!["-c:a", "libmp3lame", "-b:a", "192k"],
             Format::Wav if source.is_high_depth => vec!["-c:a", "pcm_s24le"],
             Format::Wav => vec!["-c:a", "pcm_s16le"],
-            Format::Flac => vec!["-c:a", "flac"],
+            // Filtered audio would otherwise ask for 32-bit FLAC, which the encoder refuses.
+            Format::Flac if source.is_high_depth => {
+                vec![
+                    "-c:a",
+                    "flac",
+                    "-sample_fmt",
+                    "s32",
+                    "-bits_per_raw_sample",
+                    "24",
+                ]
+            }
+            Format::Flac => vec!["-c:a", "flac", "-sample_fmt", "s16"],
             Format::Ogg => vec!["-c:a", "libvorbis", "-q:a", "6"],
             Format::M4a => vec!["-c:a", "aac", "-b:a", "192k"],
+        }
+    }
+}
+
+/// How to produce a mix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MixOptions {
+    pub format: Format,
+    pub normalize: bool,
+}
+
+impl Default for MixOptions {
+    fn default() -> Self {
+        MixOptions {
+            format: Format::Wav,
+            normalize: true,
+        }
+    }
+}
+
+impl MixOptions {
+    /// How these options are remembered between runs.
+    pub fn to_text(self) -> String {
+        format!("{} {}", self.format.extension(), self.normalize)
+    }
+
+    /// Falls back to the defaults for anything unreadable: it's only a remembered preference.
+    pub fn from_text(text: &str) -> MixOptions {
+        let mut parts = text.split_whitespace();
+        let defaults = MixOptions::default();
+        MixOptions {
+            format: parts
+                .next()
+                .and_then(Format::parse)
+                .unwrap_or(defaults.format),
+            normalize: parts
+                .next()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(defaults.normalize),
         }
     }
 }
@@ -212,9 +264,12 @@ pub struct Loudness {
 impl Loudness {
     /// The filter that applies these measurements. Values are clamped to the ranges that
     /// `loudnorm` accepts, because it refuses to run at all if one falls outside them.
+    ///
+    /// `loudnorm` hands over a clip under 3 seconds as one huge frame, which the FLAC encoder
+    /// rejects, so the output is split back into normal-sized frames.
     fn linear_filter(&self) -> String {
         format!(
-            "loudnorm={LOUDNORM_TARGET}:measured_I={:.2}:measured_TP={:.2}:measured_LRA={:.2}:             measured_thresh={:.2}:offset={:.2}:linear=true",
+            "loudnorm={LOUDNORM_TARGET}:measured_I={:.2}:measured_TP={:.2}:measured_LRA={:.2}:             measured_thresh={:.2}:offset={:.2}:linear=true,asetnsamples=n=4096:p=0",
             self.input_i.clamp(-99.0, 0.0),
             self.input_tp.clamp(-99.0, 99.0),
             self.input_lra.clamp(0.0, 99.0),
@@ -298,11 +353,30 @@ pub fn parse_kept_range(ffmpeg_output: &str, duration: Option<f64>) -> Result<Ke
     Ok(KeptRange { start, end })
 }
 
-/// Sums all inputs at equal level, for as long as the longest one lasts.
-///
-/// The sum is turned down so that it stays below 0 LUFS however many loud files are layered,
-/// which `loudnorm` requires of its measurements. Normalizing sets the final level afterwards.
-fn mix_graph(input_count: usize, sample_rate: u32) -> String {
+/// The peak level that `volumedetect` measured, in dBFS.
+fn parse_peak(ffmpeg_output: &str) -> Option<f64> {
+    let line = ffmpeg_output
+        .lines()
+        .find(|line| line.contains("max_volume: "))?;
+    let rest = &line[line.find("max_volume: ")? + "max_volume: ".len()..];
+    rest.split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+        .filter(|p: &f64| p.is_finite())
+}
+
+/// The gain that leaves a sum at its natural level, unless its peak would pass the ceiling.
+fn peak_safe_gain(sum_peak: f64) -> f64 {
+    if sum_peak > MIX_PEAK_CEILING {
+        10f64.powf((MIX_PEAK_CEILING - sum_peak) / 20.0)
+    } else {
+        1.0
+    }
+}
+
+/// Sums all inputs at equal level, for as long as the longest one lasts, then applies `gain`.
+fn mix_graph(input_count: usize, sample_rate: u32, gain: f64) -> String {
     let mut graph = String::new();
     let mut labels = String::new();
     for i in 0..input_count {
@@ -311,12 +385,9 @@ fn mix_graph(input_count: usize, sample_rate: u32) -> String {
         );
         labels += &format!("[a{i}]");
     }
-    let headroom = MIX_HEADROOM / input_count as f64;
     graph
         + &labels
-        + &format!(
-            "amix=inputs={input_count}:duration=longest:normalize=0,volume={headroom}[mixed]"
-        )
+        + &format!("amix=inputs={input_count}:duration=longest:normalize=0,volume={gain}[mixed]")
 }
 
 /// Chooses a filename stem that describes the mix.
@@ -483,9 +554,9 @@ impl Engine {
             on_progress(1.0);
             Ok(log)
         } else {
+            // FFmpeg's first error is the cause; the rest are consequences of it.
             let reason = log
                 .lines()
-                .rev()
                 .map(str::trim)
                 .find(|line| !line.is_empty())
                 .unwrap_or("FFmpeg failed without an error message")
@@ -623,10 +694,11 @@ impl Engine {
         self.render_edit(input, &filter, "trimmed", &probe, on_progress)
     }
 
-    /// Layers the inputs into one loudness-normalized 24-bit stereo WAV beside the first input.
+    /// Layers the inputs into one stereo file beside the first input.
     pub fn mix(
         &self,
         inputs: &[PathBuf],
+        options: MixOptions,
         on_progress: &mut dyn FnMut(f64),
     ) -> Result<PathBuf, Failure> {
         let mut probes = Vec::with_capacity(inputs.len());
@@ -655,14 +727,22 @@ impl Engine {
             input_args.push(OsString::from("-i"));
             input_args.push(input.into());
         }
-        let graph = mix_graph(inputs.len(), sample_rate);
+        // Turned down while measuring, so that it stays below 0 LUFS however many loud files are
+        // layered, which `loudnorm` requires. The gain is taken back out of the results below.
+        let measuring_gain = MIX_HEADROOM / inputs.len() as f64;
+        let graph = mix_graph(inputs.len(), sample_rate, measuring_gain);
 
         // Pass 1: measure, so that pass 2 can apply one clean gain instead of riding the levels.
+        let measure = if options.normalize {
+            format!("volumedetect,loudnorm={LOUDNORM_TARGET}:print_format=json")
+        } else {
+            "volumedetect".to_string()
+        };
         let mut analysis = args(&["-loglevel", "info"]);
         analysis.extend(input_args.iter().cloned());
         analysis.extend(args(&[
             "-filter_complex",
-            &format!("{graph};[mixed]loudnorm={LOUDNORM_TARGET}:print_format=json[out]"),
+            &format!("{graph};[mixed]{measure}[out]"),
             "-map",
             "[out]",
             "-f",
@@ -673,14 +753,29 @@ impl Engine {
             on_progress(f * ANALYSIS_SHARE)
         })?;
 
-        let final_graph = match parse_loudness(&log) {
+        let loudness = parse_loudness(&log).filter(|_| options.normalize);
+        let final_graph = match loudness {
             Some(loudness) => format!("{graph};[mixed]{}[out]", loudness.linear_filter()),
-            None => format!("{graph};[mixed]anull[out]"),
+            // Not normalizing, or the mix is too short or quiet for loudness to be measured.
+            None => {
+                let gain = parse_peak(&log).map_or(1.0, |peak| {
+                    peak_safe_gain(peak - 20.0 * measuring_gain.log10())
+                });
+                format!(
+                    "{};[mixed]anull[out]",
+                    mix_graph(inputs.len(), sample_rate, gain)
+                )
+            }
         };
 
         // Pass 2: render.
         let dir = parent_dir(&inputs[0]);
         let temp = TempFile::beside(dir, "mix")?;
+        let format = options.format;
+        let settings = Probe {
+            is_high_depth: true,
+            ..Probe::default()
+        };
         let mut render = args(&["-loglevel", "error", "-y"]);
         render.extend(input_args);
         render.extend(args(&[
@@ -694,17 +789,25 @@ impl Engine {
             // loudnorm works at 192 kHz internally, so the output rate must be set explicitly.
             "-ar",
             &sample_rate.to_string(),
-            "-c:a",
-            "pcm_s24le",
-            "-f",
-            "wav",
         ]));
+        render.extend(
+            format
+                .conversion_args(&settings)
+                .into_iter()
+                .map(OsString::from),
+        );
+        render.extend(args(&["-f", format.muxer()]));
         render.push(temp.0.clone().into());
         self.run(&render, duration, &mut |f| {
             on_progress(ANALYSIS_SHARE + f * (1.0 - ANALYSIS_SHARE))
         })?;
 
-        Ok(publish(&temp.0, dir, &mix_stem(inputs), "wav")?)
+        Ok(publish(
+            &temp.0,
+            dir,
+            &mix_stem(inputs),
+            format.extension(),
+        )?)
     }
 }
 
@@ -747,6 +850,39 @@ mod tests {
     fn ignores_cover_art_before_audio() {
         let text = "  Stream #0:0: Video: mjpeg, 500x500\n  Stream #0:1: Audio: flac, 96000 Hz, stereo, s32 (24 bit)\n";
         assert_eq!(parse_probe(text).unwrap().sample_rate, Some(96000));
+    }
+
+    #[test]
+    fn leaves_quiet_sums_alone_and_turns_loud_ones_down_to_the_ceiling() {
+        assert_eq!(peak_safe_gain(-6.0), 1.0);
+        let gain = peak_safe_gain(5.0);
+        assert!((20.0 * gain.log10() + 6.0).abs() < 1e-9, "{gain}");
+    }
+
+    #[test]
+    fn reads_the_peak_level() {
+        let log = "[Parsed_volumedetect_5 @ 0] mean_volume: -20.1 dB\n\
+            [Parsed_volumedetect_5 @ 0] max_volume: -3.2 dB\n";
+        assert_eq!(parse_peak(log), Some(-3.2));
+        assert_eq!(parse_peak("nothing here"), None);
+    }
+
+    #[test]
+    fn remembers_mix_options() {
+        let options = MixOptions {
+            format: Format::Flac,
+            normalize: false,
+        };
+        assert_eq!(MixOptions::from_text(&options.to_text()), options);
+    }
+
+    #[test]
+    fn ignores_unreadable_remembered_options() {
+        assert_eq!(
+            MixOptions::from_text("garbage text\n"),
+            MixOptions::default()
+        );
+        assert_eq!(MixOptions::from_text(""), MixOptions::default());
     }
 
     fn kept(log: &str, duration: Option<f64>) -> Result<(f64, Option<f64>), String> {

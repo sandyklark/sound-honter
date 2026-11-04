@@ -58,6 +58,8 @@ Name: "{usersendto}\Sound Honter Convert to MP3"; Filename: "{app}\{#AppExe}"; P
 [Registry]
 #define MenuKey "Software\Classes\SystemFileAssociations\audio\shell\SoundHonter"
 Root: HKA; Subkey: "{#MenuKey}"; Flags: uninsdeletekey
+; Upgrades start from a clean submenu, so entries that were renamed don't linger as duplicates.
+Root: HKA; Subkey: "{#MenuKey}\shell"; ValueType: none; Flags: deletekey
 Root: HKA; Subkey: "{#MenuKey}"; ValueType: string; ValueName: "MUIVerb"; ValueData: "{#AppName}"
 Root: HKA; Subkey: "{#MenuKey}"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe},0"
 Root: HKA; Subkey: "{#MenuKey}"; ValueType: string; ValueName: "SubCommands"; ValueData: ""
@@ -83,6 +85,9 @@ Root: HKA; Subkey: "{#MenuKey}\shell\70trim\command"; ValueType: string; ValueDa
 Root: HKA; Subkey: "{#MenuKey}\shell\80mix"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Mix selected files"
 Root: HKA; Subkey: "{#MenuKey}\shell\80mix"; ValueType: dword; ValueName: "CommandFlags"; ValueData: "$20"
 Root: HKA; Subkey: "{#MenuKey}\shell\80mix\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" mix --queue ""%1"""
+
+Root: HKA; Subkey: "{#MenuKey}\shell\90mixoptions"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Mix with options..."
+Root: HKA; Subkey: "{#MenuKey}\shell\90mixoptions\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" mix --ask --queue ""%1"""
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{localappdata}\{#AppName}"

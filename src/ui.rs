@@ -1,5 +1,6 @@
 //! Native Windows dialogs, built on Task Dialogs so they match the system theme and DPI.
 
+use soundhonter::engine::{Format, MixOptions};
 use soundhonter::job::{Shared, Status};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::Ordering;
@@ -110,6 +111,63 @@ pub fn message(
     } else {
         IDCLOSE
     }
+}
+
+/// Asks how to mix a selection. Returns `None` if the user cancelled.
+pub fn mix_options(file_count: usize, initial: MixOptions) -> Option<MixOptions> {
+    const ID_MIX: i32 = 1100;
+    const ID_FIRST_FORMAT: i32 = 1200;
+
+    let title = wide(TITLE);
+    let heading = wide(&format!("Mix {file_count} files"));
+    let body = wide("Choose a format for the mix. It's saved beside the first file.");
+    let mix_label = wide("Mix");
+    let normalize_label = wide("Normalize loudness");
+    let format_labels: Vec<Vec<u16>> = Format::ALL
+        .iter()
+        .map(|format| wide(&format.extension().to_uppercase()))
+        .collect();
+    let radios: Vec<TASKDIALOG_BUTTON> = format_labels
+        .iter()
+        .enumerate()
+        .map(|(i, label)| TASKDIALOG_BUTTON {
+            nButtonID: ID_FIRST_FORMAT + i as i32,
+            pszButtonText: label.as_ptr(),
+        })
+        .collect();
+    let buttons = [TASKDIALOG_BUTTON {
+        nButtonID: ID_MIX,
+        pszButtonText: mix_label.as_ptr(),
+    }];
+    let initial_index = Format::ALL.iter().position(|f| *f == initial.format);
+
+    let mut config = base_config(title.as_ptr());
+    config.pszMainInstruction = heading.as_ptr();
+    config.pszContent = body.as_ptr();
+    config.pfCallback = Some(plain_callback);
+    config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    config.cButtons = buttons.len() as u32;
+    config.pButtons = buttons.as_ptr();
+    config.nDefaultButton = ID_MIX;
+    config.cRadioButtons = radios.len() as u32;
+    config.pRadioButtons = radios.as_ptr();
+    config.nDefaultRadioButton = ID_FIRST_FORMAT + initial_index.unwrap_or(0) as i32;
+    config.pszVerificationText = normalize_label.as_ptr();
+    if initial.normalize {
+        config.dwFlags |= TDF_VERIFICATION_FLAG_CHECKED;
+    }
+
+    let (mut clicked, mut radio, mut normalize) = (0, 0, 0);
+    // SAFETY: every pointer in `config` refers to a local that outlives this blocking call.
+    let result = unsafe { TaskDialogIndirect(&config, &mut clicked, &mut radio, &mut normalize) };
+    if result != S_OK || clicked != ID_MIX {
+        return None;
+    }
+    let index = (radio - ID_FIRST_FORMAT) as usize;
+    Some(MixOptions {
+        format: Format::ALL.get(index).copied().unwrap_or(initial.format),
+        normalize: normalize != 0,
+    })
 }
 
 /// Shows a progress dialog until the work sets `finished`. Cancel sets the shared flag.
