@@ -54,6 +54,11 @@ impl Format {
         }
     }
 
+    /// OGG and WAV can't hold embedded pictures, and FFmpeg fails if asked to put one in them.
+    fn holds_cover_art(self) -> bool {
+        matches!(self, Format::Mp3 | Format::Flac | Format::M4a)
+    }
+
     fn muxer(self) -> &'static str {
         match self {
             Format::M4a => "ipod",
@@ -103,6 +108,44 @@ pub struct Probe {
     pub sample_rate: Option<u32>,
     /// False only when the source is known to fit in 16 bits.
     pub is_high_depth: bool,
+    /// The stream holding embedded cover art, if it's in a format every target accepts.
+    pub cover_stream: Option<u32>,
+    /// OGG files keep their tags on the audio stream, rather than on the file as other formats do.
+    pub tags_on_stream: bool,
+}
+
+impl Probe {
+    /// Selects what to carry over: the audio, its tags, and cover art if `format` can hold it.
+    fn stream_args(&self, format: Format) -> Vec<OsString> {
+        let mut selected = args(&["-map", "0:a:0"]);
+        if self.tags_on_stream {
+            selected.extend(args(&["-map_metadata", "0:s:a:0"]));
+        }
+        if let Some(stream) = self.cover_stream.filter(|_| format.holds_cover_art()) {
+            let map = format!("0:{stream}");
+            selected.extend(args(&["-map", &map, "-c:v", "copy"]));
+            selected.extend(args(&["-disposition:v", "attached_pic"]));
+        }
+        selected
+    }
+}
+
+/// Finds a stream of embedded cover art in a line of `ffmpeg -i` output.
+fn parse_cover_stream(line: &str) -> Option<u32> {
+    if !line.contains("(attached pic)") {
+        return None;
+    }
+    let (stream, details) = line
+        .trim_start()
+        .strip_prefix("Stream #0:")?
+        .split_once(": ")?;
+    if !(details.starts_with("Video: mjpeg") || details.starts_with("Video: png")) {
+        return None;
+    }
+    let digits = stream
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(stream.len());
+    stream[..digits].parse().ok()
 }
 
 /// Parses `ffmpeg -i` output. Returns `None` if the input has no audio stream.
@@ -129,6 +172,8 @@ pub fn parse_probe(ffmpeg_output: &str) -> Option<Probe> {
         duration_secs,
         sample_rate,
         is_high_depth: !is_low_depth,
+        cover_stream: ffmpeg_output.lines().find_map(parse_cover_stream),
+        tags_on_stream: ffmpeg_output.contains("Input #0, ogg"),
     })
 }
 
@@ -415,7 +460,7 @@ impl Engine {
 
         let mut command = args(&["-loglevel", "error", "-y", "-i"]);
         command.push(input.into());
-        command.push("-vn".into());
+        command.extend(probe.stream_args(format));
         command.extend(format.codec_args(&probe).into_iter().map(OsString::from));
         command.extend(args(&["-f", format.muxer()]));
         command.push(temp.0.clone().into());
@@ -490,6 +535,9 @@ impl Engine {
             &final_graph,
             "-map",
             "[out]",
+            // A mix isn't the first file, so it shouldn't inherit that file's title and artist.
+            "-map_metadata",
+            "-1",
             // loudnorm works at 192 kHz internally, so the output rate must be set explicitly.
             "-ar",
             &sample_rate.to_string(),
@@ -546,6 +594,22 @@ mod tests {
     fn ignores_cover_art_before_audio() {
         let text = "  Stream #0:0: Video: mjpeg, 500x500\n  Stream #0:1: Audio: flac, 96000 Hz, stereo, s32 (24 bit)\n";
         assert_eq!(parse_probe(text).unwrap().sample_rate, Some(96000));
+    }
+
+    #[test]
+    fn finds_cover_art_streams() {
+        let line = "  Stream #0:1[0x2]: Video: png, rgb24, 64x64 [SAR 1:1 DAR 1:1], 90k tbn (attached pic)";
+        assert_eq!(parse_cover_stream(line), Some(1));
+        let jpeg = "  Stream #0:2(eng): Video: mjpeg (Baseline), yuvj420p, 500x500, 90k tbn (attached pic)";
+        assert_eq!(parse_cover_stream(jpeg), Some(2));
+    }
+
+    #[test]
+    fn ignores_real_video_and_unusual_picture_formats() {
+        let video = "  Stream #0:1: Video: h264, yuv420p, 1920x1080, 30 fps";
+        assert_eq!(parse_cover_stream(video), None);
+        let webp = "  Stream #0:1: Video: webp, yuv420p, 64x64 (attached pic)";
+        assert_eq!(parse_cover_stream(webp), None);
     }
 
     const LOUDNORM: &str = "[Parsed_loudnorm_0 @ 0] \n{\n\t\"input_i\" : \"-8.04\",\n\t\"input_tp\" : \"0.12\",\n\

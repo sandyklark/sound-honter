@@ -582,3 +582,109 @@ fn version_flag_reports_the_package_version() {
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains(env!("CARGO_PKG_VERSION")), "{text}");
 }
+
+impl Scratch {
+    /// Writes a tagged sound in the given format, with cover art if the format can hold it.
+    fn tagged(&self, extension: &str) -> PathBuf {
+        let cover = self.0.join("cover.png");
+        let run = |args: &[&str], target: &Path| {
+            let status = Command::new(ffmpeg())
+                .args(["-hide_banner", "-loglevel", "error", "-y"])
+                .args(args)
+                .arg(target)
+                .status()
+                .unwrap();
+            assert!(status.success(), "failed to write {}", target.display());
+        };
+        run(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:s=64x64:d=1",
+                "-frames:v",
+                "1",
+            ],
+            &cover,
+        );
+
+        let target = self.0.join(format!("tagged.{extension}"));
+        let mut command = vec!["-f", "lavfi", "-i", "sine=440:d=1:r=44100"];
+        let cover_path = cover.to_str().unwrap();
+        if matches!(extension, "mp3" | "flac" | "m4a") {
+            command.extend(["-i", cover_path, "-map", "0", "-map", "1", "-c:v", "copy"]);
+            command.extend(["-disposition:v", "attached_pic"]);
+        }
+        command.extend(["-metadata", "title=MyTitle", "-metadata", "artist=MyArtist"]);
+        run(&command, &target);
+        fs::remove_file(&cover).unwrap();
+        target
+    }
+}
+
+fn has_tags(file: &Path) -> bool {
+    let info = stream_info(file).to_lowercase();
+    info.contains("mytitle") && info.contains("myartist")
+}
+
+fn has_cover(file: &Path) -> bool {
+    stream_info(file).contains("(attached pic)")
+}
+
+fn printed_output(output: &Output) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+}
+
+#[test]
+fn converting_keeps_tags_between_every_pair_of_formats() {
+    let formats = ["mp3", "flac", "m4a", "ogg", "wav"];
+    for source in formats {
+        for target in formats {
+            let scratch = Scratch::new();
+            let input = scratch.tagged(source);
+            let output = scratch.run(&["convert", target], &[&input]);
+            assert_success(&output);
+            let result = printed_output(&output);
+            assert!(
+                has_tags(&result),
+                "{source} to {target}: {}",
+                stream_info(&result)
+            );
+        }
+    }
+}
+
+#[test]
+fn converting_keeps_cover_art_where_the_format_can_hold_it() {
+    for source in ["mp3", "flac", "m4a"] {
+        for (target, expected) in [
+            ("mp3", true),
+            ("flac", true),
+            ("m4a", true),
+            ("ogg", false),
+            ("wav", false),
+        ] {
+            let scratch = Scratch::new();
+            let input = scratch.tagged(source);
+            let output = scratch.run(&["convert", target], &[&input]);
+            assert_success(&output);
+            assert_eq!(
+                has_cover(&printed_output(&output)),
+                expected,
+                "{source} to {target}"
+            );
+        }
+    }
+}
+
+#[test]
+fn mixes_do_not_pretend_to_be_their_first_file() {
+    let scratch = Scratch::new();
+    let tagged = scratch.tagged("flac");
+    let plain = scratch.copy("drum.wav", "drum.wav");
+    let output = scratch.run(&["mix"], &[&tagged, &plain]);
+    assert_success(&output);
+    assert!(!stream_info(&printed_output(&output))
+        .to_lowercase()
+        .contains("mytitle"));
+}
