@@ -58,7 +58,7 @@ try {
     Write-Host ''
     Write-Host "Built $Installer"
     Write-Host "SHA-256 $Hash"
-    if (-not $SignCommand) { Write-Host 'Not code-signed: Windows SmartScreen will warn users. See docs\RELEASING.md.' }
+    if (-not $SignCommand) { Write-Host 'Not code-signed: Windows SmartScreen will warn when it is installed.' }
 }
 finally {
     Pop-Location

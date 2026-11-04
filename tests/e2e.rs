@@ -271,6 +271,30 @@ fn bad_files_are_reported_without_stopping_the_batch() {
 }
 
 #[test]
+fn read_only_folders_get_a_clear_message() {
+    let scratch = Scratch::new();
+    let input = scratch.copy("drum.wav", "drum.wav");
+    let folder = scratch.0.to_str().unwrap().to_string();
+    // Everyone (S-1-1-0) may not create files in this folder.
+    let denied = Command::new("icacls")
+        .args([&folder, "/deny", "*S-1-1-0:(WD,AD)"])
+        .output()
+        .unwrap();
+    assert!(denied.status.success());
+
+    let output = scratch.run(&["convert", "mp3"], &[&input]);
+
+    let restored = Command::new("icacls")
+        .args([&folder, "/remove:d", "*S-1-1-0"])
+        .output()
+        .unwrap();
+    assert!(restored.status.success());
+    assert_eq!(output.status.code(), Some(1));
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(errors.contains("Can't save in this folder"), "{errors}");
+}
+
+#[test]
 fn missing_ffmpeg_is_reported_and_leaves_nothing_behind() {
     let scratch = Scratch::new();
     let good = scratch.copy("drum.wav", "good.wav");

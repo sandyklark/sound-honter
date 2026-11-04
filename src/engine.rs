@@ -256,8 +256,16 @@ fn publish(temp: &Path, dir: &Path, stem: &str, extension: &str) -> io::Result<P
 struct TempFile(PathBuf);
 
 impl TempFile {
-    fn beside(dir: &Path, label: &str) -> TempFile {
-        TempFile(dir.join(format!(".soundhonter-{}-{label}.tmp", std::process::id())))
+    /// Creates the file, which also confirms up front that the folder can be written to.
+    fn beside(dir: &Path, label: &str) -> Result<TempFile, Failure> {
+        let path = dir.join(format!(".soundhonter-{}-{label}.tmp", std::process::id()));
+        match fs::File::create(&path) {
+            Ok(_) => Ok(TempFile(path)),
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Err(Failure::Error(
+                format!("Can't save in this folder: {}", dir.display()),
+            )),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
@@ -403,7 +411,7 @@ impl Engine {
     ) -> Result<PathBuf, Failure> {
         let probe = self.probe(input)?;
         let dir = parent_dir(input);
-        let temp = TempFile::beside(dir, "convert");
+        let temp = TempFile::beside(dir, "convert")?;
 
         let mut command = args(&["-loglevel", "error", "-y", "-i"]);
         command.push(input.into());
@@ -474,7 +482,7 @@ impl Engine {
 
         // Pass 2: render.
         let dir = parent_dir(&inputs[0]);
-        let temp = TempFile::beside(dir, "mix");
+        let temp = TempFile::beside(dir, "mix")?;
         let mut render = args(&["-loglevel", "error", "-y"]);
         render.extend(input_args);
         render.extend(args(&[

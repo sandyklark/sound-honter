@@ -247,11 +247,13 @@ fn show_summary(outcome: &Outcome) {
     let clicked = match (failures.as_slice(), outputs.is_empty(), cancelled) {
         // The user asked for this, and there's nothing to show for it.
         ([], true, true) => return,
+        // A process that Explorer started late, after another had already handled its file.
+        ([], true, false) => return,
         ([], false, true) => {
             let heading = format!("Cancelled after finishing {}", file_count(outputs.len()));
             ui::message(ui::Icon::None, &heading, &name_list(outputs), None, buttons)
         }
-        ([], _, false) => {
+        ([], false, false) => {
             let heading = format!("Finished {}", file_count(outputs.len()));
             ui::message(ui::Icon::None, &heading, &name_list(outputs), None, buttons)
         }

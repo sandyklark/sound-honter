@@ -150,6 +150,29 @@ try {
     Check 'failures are logged' (Test-Path (Join-Path $env:LOCALAPPDATA 'Sound Honter\last-errors.log'))
     Remove-Item -LiteralPath $Corrupt
 
+    # Explorer starts one process per selected file: a big selection must still become one job.
+    $Many = 1..15 | ForEach-Object {
+        $Copy = Join-Path $Audio ('many{0:d2}.wav' -f $_)
+        Copy-Item -LiteralPath $Drum $Copy
+        $Copy
+    }
+    [ShellMenu]::Click([string[]]$Many, 'Sound Honter > Mix selected files')
+    # A bigger job takes longer, so wait for its result before looking for the summary dialog.
+    Check '15 files: mix finishes' (Wait-Until { (Find-Audio 'many*mix*.wav').Count -ge 1 })
+    Check '15 files: mix summary dialog appears and closes' (Close-AppDialog '')
+    $Mixes = @(Find-Audio 'many*mix*.wav')
+    Write-Host "  info  mixes made from 15 files: $($Mixes.Name -join ', ')"
+    Check '15 files: exactly one mix of all of them' ($Mixes.Count -eq 1 -and $Mixes[0].Name -like '* + 14 more mix*')
+    [ShellMenu]::Click([string[]]$Many, 'Sound Honter > Convert to M4A')
+    Check '15 files: convert finishes' (Wait-Until { (Find-Audio 'many*.m4a').Count -ge 15 })
+    Check '15 files: convert summary dialog appears and closes' (Close-AppDialog 'convert-15')
+    Check '15 files: every file converted exactly once' ((Find-Audio 'many*.m4a').Count -eq 15 -and (Find-Audio 'many*(*.m4a').Count -eq 0)
+    $Extra = Join-Path $Audio 'many16.wav'
+    Copy-Item -LiteralPath $Drum $Extra
+    $Items = @([ShellMenu]::Items([string[]]($Many + $Extra)) | Where-Object { $_ -like 'Sound Honter*' })
+    Write-Host "  info  Sound Honter menu entries with 16 files selected: $($Items.Count)"
+    Get-ChildItem -LiteralPath $Audio -Filter 'many*' | Remove-Item
+
     # An hour of audio takes long enough to see progress, and to cancel.
     $Long = Join-Path $Audio 'long.wav'
     & (Join-Path $InstallDir 'ffmpeg\ffmpeg.exe') -hide_banner -loglevel error -f lavfi -i 'sine=440:d=3600:r=44100' -y $Long
@@ -166,6 +189,11 @@ try {
     Write-Host 'About dialog'
     Start-Process (Join-Path $InstallDir 'soundhonter.exe')
     Check 'about dialog appears and closes' (Close-AppDialog 'about')
+
+    Write-Host 'Reinstalling over the top'
+    $Process = Start-Process $Installer -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
+    Check 'reinstall exits cleanly' ($Process.ExitCode -eq 0)
+    Check 'reinstall keeps the chosen folder' (Test-Path (Join-Path $InstallDir 'soundhonter.exe'))
 
     Write-Host 'Uninstalling'
     $Process = Start-Process (Join-Path $InstallDir 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
