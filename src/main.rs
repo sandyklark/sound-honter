@@ -18,6 +18,8 @@ use std::{fs, thread};
 const USAGE: &str = "\
 Usage:
   soundhonter convert <mp3|wav|flac|ogg|m4a> [--queue] [--no-ui] <files...>
+  soundhonter normalize [--queue] [--no-ui] <files...>
+  soundhonter trim [--queue] [--no-ui] <files...>
   soundhonter mix [--queue] [--no-ui] <files...>
 
   --queue   Gather files from separate launches into one job (used by the right-click menu)
@@ -40,6 +42,8 @@ fn parse_args(args: Vec<OsString>) -> Result<Request, String> {
     let mut args = args.into_iter();
     let job = match args.next().as_deref().and_then(|a| a.to_str()) {
         Some("mix") => Job::Mix,
+        Some("normalize") => Job::Normalize,
+        Some("trim") => Job::Trim,
         Some("convert") => {
             let name = args.next().ok_or("Convert needs a format.")?;
             let name = name.to_string_lossy();
@@ -164,6 +168,8 @@ fn execute(request: Request) -> ExitCode {
     };
     let initial_heading = match job {
         Job::Convert(_) => "Converting…",
+        Job::Normalize => "Normalizing…",
+        Job::Trim => "Trimming…",
         Job::Mix => "Mixing…",
     };
     ui::progress(&shared, initial_heading);
@@ -296,6 +302,7 @@ fn show_about() {
     let body = "Sound Honter works from the File Explorer right-click menu. \
         On Windows 11, choose \"Show more options\" first.\n\n\
         Convert: right-click one or more audio files, then choose Sound Honter and a format.\n\n\
+        Normalize or trim: the same, to even out loudness or cut silence from both ends.\n\n\
         Mix: select two or more audio files, right-click, then choose Sound Honter > Mix selected files. \
         For more than 15 files, use Send to > Sound Honter Mix.\n\n\
         New files are saved beside the originals. Nothing is ever overwritten.";

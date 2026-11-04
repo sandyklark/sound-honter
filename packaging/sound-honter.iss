@@ -72,10 +72,17 @@ Root: HKA; Subkey: "{#MenuKey}"; ValueType: string; ValueName: "SubCommands"; Va
 #emit ConvertVerb("40ogg", "Convert to OGG", "ogg")
 #emit ConvertVerb("50m4a", "Convert to M4A", "m4a")
 
-Root: HKA; Subkey: "{#MenuKey}\shell\60mix"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Mix selected files"
-; ECF_SEPARATORBEFORE
-Root: HKA; Subkey: "{#MenuKey}\shell\60mix"; ValueType: dword; ValueName: "CommandFlags"; ValueData: "$20"
-Root: HKA; Subkey: "{#MenuKey}\shell\60mix\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" mix --queue ""%1"""
+; CommandFlags $20 is ECF_SEPARATORBEFORE.
+Root: HKA; Subkey: "{#MenuKey}\shell\60normalize"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Normalize loudness"
+Root: HKA; Subkey: "{#MenuKey}\shell\60normalize"; ValueType: dword; ValueName: "CommandFlags"; ValueData: "$20"
+Root: HKA; Subkey: "{#MenuKey}\shell\60normalize\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" normalize --queue ""%1"""
+
+Root: HKA; Subkey: "{#MenuKey}\shell\70trim"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Trim silence"
+Root: HKA; Subkey: "{#MenuKey}\shell\70trim\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" trim --queue ""%1"""
+
+Root: HKA; Subkey: "{#MenuKey}\shell\80mix"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Mix selected files"
+Root: HKA; Subkey: "{#MenuKey}\shell\80mix"; ValueType: dword; ValueName: "CommandFlags"; ValueData: "$20"
+Root: HKA; Subkey: "{#MenuKey}\shell\80mix\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" mix --queue ""%1"""
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{localappdata}\{#AppName}"

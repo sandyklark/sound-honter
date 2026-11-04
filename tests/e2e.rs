@@ -688,3 +688,212 @@ fn mixes_do_not_pretend_to_be_their_first_file() {
         .to_lowercase()
         .contains("mytitle"));
 }
+
+fn integrated_loudness(file: &Path) -> f64 {
+    let log = analysis(file, "ebur128=peak=true");
+    measure(&log[log.rfind("Summary:").unwrap()..], "I:")
+}
+
+#[test]
+fn normalize_reaches_the_target_and_keeps_the_file_as_it_was() {
+    let scratch = Scratch::new();
+    let input = scratch.generate("sine=440:d=6:r=22050,volume=0.05", "quiet.wav");
+    assert_success(&scratch.run(&["normalize"], &[&input]));
+
+    let result = scratch.0.join("quiet normalized.wav");
+    assert!((integrated_loudness(&result) + 16.0).abs() < 1.0);
+    let info = stream_info(&result);
+    assert!(info.contains("22050 Hz, mono"), "{info}");
+    assert!(info.contains("pcm_s16le"), "{info}");
+    assert!((duration(&result) - 6.0).abs() < 0.05, "{info}");
+}
+
+#[test]
+fn normalize_keeps_format_rate_tags_and_cover() {
+    let scratch = Scratch::new();
+    let input = scratch.0.join("song.mp3");
+    let long = scratch.generate("sine=330:d=4:r=48000", "long.wav");
+    let tagged = scratch.tagged("mp3");
+    let status = Command::new(ffmpeg())
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(&long)
+        .arg("-i")
+        .arg(&tagged)
+        .args([
+            "-map",
+            "0:a",
+            "-map",
+            "1:v",
+            "-map_metadata",
+            "1",
+            "-c:v",
+            "copy",
+        ])
+        .args(["-disposition:v", "attached_pic"])
+        .arg(&input)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert_success(&scratch.run(&["normalize"], &[&input]));
+
+    let result = scratch.0.join("song normalized.mp3");
+    let info = stream_info(&result);
+    assert!(
+        info.contains("Audio: mp3") && info.contains("48000 Hz, mono"),
+        "{info}"
+    );
+    assert!(has_tags(&result), "{info}");
+    assert!(has_cover(&result), "{info}");
+}
+
+#[test]
+fn normalize_explains_silent_files_and_carries_on() {
+    let scratch = Scratch::new();
+    let silent = scratch.generate("anullsrc=r=48000:cl=stereo:d=2", "silent.wav");
+    let good = scratch.generate("sine=440:d=4:r=48000", "good.wav");
+    let output = scratch.run(&["normalize"], &[&silent, &good]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        errors.contains(soundhonter::engine::TOO_QUIET_TO_MEASURE),
+        "{errors}"
+    );
+    assert!(scratch.0.join("good normalized.wav").is_file());
+    assert!(!scratch.0.join("silent normalized.wav").exists());
+}
+
+#[test]
+fn normalize_copes_with_a_very_short_sound() {
+    let scratch = Scratch::new();
+    let blip = scratch.generate("sine=880:d=0.1:r=48000", "blip.wav");
+    let output = scratch.run(&["normalize"], &[&blip]);
+    let errors = String::from_utf8_lossy(&output.stderr);
+    // Either it worked, or it says why: what matters is no raw FFmpeg error.
+    assert!(
+        output.status.success() || errors.contains(soundhonter::engine::TOO_QUIET_TO_MEASURE),
+        "{errors}"
+    );
+}
+
+/// Half a second of silence, one second of tone, then half a second of silence.
+fn padded_tone(scratch: &Scratch) -> PathBuf {
+    scratch.generate(
+        "sine=440:d=1:r=48000,adelay=500:all=1,apad=pad_dur=0.5",
+        "padded.wav",
+    )
+}
+
+#[test]
+fn trim_cuts_silence_from_both_ends() {
+    let scratch = Scratch::new();
+    let input = padded_tone(&scratch);
+    assert!(
+        (duration(&input) - 2.0).abs() < 0.03,
+        "{}",
+        stream_info(&input)
+    );
+    assert_success(&scratch.run(&["trim"], &[&input]));
+
+    let result = scratch.0.join("padded trimmed.wav");
+    assert!(
+        (duration(&result) - 1.0).abs() < 0.03,
+        "{}",
+        stream_info(&result)
+    );
+    // The kept audio is the tone, starting straight away.
+    let log = analysis(&result, "silencedetect=n=-60dB:d=0.02");
+    assert!(!log.contains("silence_start"), "{log}");
+}
+
+#[test]
+fn trim_keeps_silence_in_the_middle() {
+    let scratch = Scratch::new();
+    let input = scratch.generate(
+        "aevalsrc='if(between(t,0.6,1.4),0,sin(2*PI*440*t))':d=2:s=48000",
+        "gap.wav",
+    );
+    let output = scratch.run(&["trim"], &[&input]);
+    assert_eq!(output.status.code(), Some(1));
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(errors.contains(soundhonter::engine::NO_SILENCE), "{errors}");
+    assert_eq!(scratch.files(), ["gap.wav"]);
+}
+
+#[test]
+fn trim_keeps_format_and_tags() {
+    let scratch = Scratch::new();
+    let tagged = scratch.tagged("flac");
+    let padded = padded_tone(&scratch);
+    let input = scratch.0.join("song.flac");
+    let status = Command::new(ffmpeg())
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(&padded)
+        .arg("-i")
+        .arg(&tagged)
+        .args([
+            "-map",
+            "0:a",
+            "-map",
+            "1:v",
+            "-map_metadata",
+            "1",
+            "-c:v",
+            "copy",
+        ])
+        .args(["-disposition:v", "attached_pic"])
+        .arg(&input)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert_success(&scratch.run(&["trim"], &[&input]));
+
+    let result = scratch.0.join("song trimmed.flac");
+    assert!(
+        (duration(&result) - 1.0).abs() < 0.03,
+        "{}",
+        stream_info(&result)
+    );
+    assert!(has_tags(&result), "{}", stream_info(&result));
+    assert!(has_cover(&result), "{}", stream_info(&result));
+}
+
+#[test]
+fn trim_explains_silent_files() {
+    let scratch = Scratch::new();
+    let silent = scratch.generate("anullsrc=r=48000:cl=stereo:d=2", "silent.wav");
+    let output = scratch.run(&["trim"], &[&silent]);
+    assert_eq!(output.status.code(), Some(1));
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(errors.contains(soundhonter::engine::ALL_SILENT), "{errors}");
+}
+
+#[test]
+fn sources_we_cannot_write_come_out_as_wav() {
+    let scratch = Scratch::new();
+    let input = scratch.generate("sine=440:d=4:r=48000", "sound.aiff");
+    assert_success(&scratch.run(&["normalize"], &[&input]));
+    assert!(
+        scratch.0.join("sound normalized.wav").is_file(),
+        "{:?}",
+        scratch.files()
+    );
+}
+
+#[test]
+fn queued_edits_handle_a_whole_selection() {
+    let scratch = Scratch::new();
+    let files: Vec<PathBuf> = ["a.wav", "b.wav", "c.wav"]
+        .iter()
+        .map(|name| scratch.generate("sine=440:d=4:r=48000", name))
+        .collect();
+    launch_like_explorer(&scratch, &["normalize"], &files);
+    for name in ["a", "b", "c"] {
+        assert!(
+            scratch.0.join(format!("{name} normalized.wav")).is_file(),
+            "{name}"
+        );
+    }
+}

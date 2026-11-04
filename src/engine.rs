@@ -15,6 +15,13 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Loudness target for mixes.
 const LOUDNORM_TARGET: &str = "I=-16:TP=-3:LRA=11";
+/// Anything quieter than this counts as silence when trimming.
+const SILENCE_THRESHOLD: &str = "-60dB";
+/// Silence shorter than this at either end is left alone, in seconds.
+const SHORTEST_SILENCE: f64 = 0.02;
+/// How far apart two times can be and still count as the same moment, in seconds.
+/// Reported durations are estimates for some formats, so this can't be too tight.
+const TIME_TOLERANCE: f64 = 0.1;
 /// Gain applied to a mix before analysis, on top of dividing by the number of inputs.
 const MIX_HEADROOM: f64 = 0.25;
 /// How much of a mix's progress bar is the analysis pass, rather than the render pass.
@@ -66,20 +73,27 @@ impl Format {
         }
     }
 
-    /// MP3 keeps the original delivery spec (44.1 kHz stereo, 192 kbps).
-    /// The other formats keep the source's sample rate and channels.
+    /// The format to edit a file in without changing what kind of file it is.
+    /// Sources that we can read but not write, like AIFF, come out as WAV.
+    fn matching(path: &Path) -> Format {
+        path.extension()
+            .and_then(|extension| Format::parse(&extension.to_string_lossy()))
+            .unwrap_or(Format::Wav)
+    }
+
+    /// Settings for converting to this format. MP3 keeps the original delivery spec.
+    fn conversion_args(self, source: &Probe) -> Vec<&'static str> {
+        let mut settings = self.codec_args(source);
+        if self == Format::Mp3 {
+            settings.extend(["-ar", "44100", "-ac", "2"]);
+        }
+        settings
+    }
+
+    /// Encoder settings, which keep the source's sample rate and channels.
     fn codec_args(self, source: &Probe) -> Vec<&'static str> {
         match self {
-            Format::Mp3 => vec![
-                "-c:a",
-                "libmp3lame",
-                "-ar",
-                "44100",
-                "-ac",
-                "2",
-                "-b:a",
-                "192k",
-            ],
+            Format::Mp3 => vec!["-c:a", "libmp3lame", "-b:a", "192k"],
             Format::Wav if source.is_high_depth => vec!["-c:a", "pcm_s24le"],
             Format::Wav => vec!["-c:a", "pcm_s16le"],
             Format::Flac => vec!["-c:a", "flac"],
@@ -231,6 +245,57 @@ pub fn parse_loudness(ffmpeg_output: &str) -> Option<Loudness> {
         input_thresh: value("input_thresh")?,
         target_offset: value("target_offset")?,
     })
+}
+
+/// The part of a file to keep, in seconds.
+#[derive(Debug, PartialEq)]
+pub struct KeptRange {
+    start: f64,
+    end: Option<f64>,
+}
+
+pub const TOO_QUIET_TO_MEASURE: &str = "Too quiet or too short to measure its loudness";
+pub const ALL_SILENT: &str = "The whole file is silent";
+pub const NO_SILENCE: &str = "No silence at the start or end to trim";
+
+/// Works out what to keep from `silencedetect` output, cutting silence only from the two ends.
+pub fn parse_kept_range(ffmpeg_output: &str, duration: Option<f64>) -> Result<KeptRange, Failure> {
+    let time_after = |line: &str, label: &str| -> Option<f64> {
+        let rest = &line[line.find(label)? + label.len()..];
+        rest.split_whitespace().next()?.parse().ok()
+    };
+    let mut silences: Vec<(f64, Option<f64>)> = Vec::new();
+    for line in ffmpeg_output.lines() {
+        if let Some(start) = time_after(line, "silence_start: ") {
+            silences.push((start, None));
+        } else if let Some(end) = time_after(line, "silence_end: ") {
+            match silences.last_mut() {
+                Some(last) => last.1 = Some(end),
+                None => silences.push((0.0, Some(end))),
+            }
+        }
+    }
+
+    let reaches_end = |end: Option<f64>| match (end, duration) {
+        (None, _) => true,
+        (Some(end), Some(duration)) => end >= duration - TIME_TOLERANCE,
+        (Some(_), None) => false,
+    };
+    let leading = silences
+        .first()
+        .filter(|(start, _)| *start <= TIME_TOLERANCE);
+    if leading.is_some_and(|(_, end)| reaches_end(*end)) {
+        return Err(Failure::Error(ALL_SILENT.to_string()));
+    }
+    let start = leading.and_then(|(_, end)| *end).unwrap_or(0.0);
+    let end = silences
+        .last()
+        .filter(|(_, end)| reaches_end(*end))
+        .map(|(start, _)| *start);
+    if start == 0.0 && end.is_none() {
+        return Err(Failure::Error(NO_SILENCE.to_string()));
+    }
+    Ok(KeptRange { start, end })
 }
 
 /// Sums all inputs at equal level, for as long as the longest one lasts.
@@ -461,13 +526,101 @@ impl Engine {
         let mut command = args(&["-loglevel", "error", "-y", "-i"]);
         command.push(input.into());
         command.extend(probe.stream_args(format));
-        command.extend(format.codec_args(&probe).into_iter().map(OsString::from));
+        command.extend(
+            format
+                .conversion_args(&probe)
+                .into_iter()
+                .map(OsString::from),
+        );
         command.extend(args(&["-f", format.muxer()]));
         command.push(temp.0.clone().into());
         self.run(&command, probe.duration_secs, on_progress)?;
 
         let stem = input.file_stem().unwrap_or_default().to_string_lossy();
         Ok(publish(&temp.0, dir, &stem, format.extension())?)
+    }
+
+    /// Runs an analysis pass over a file's audio, returning FFmpeg's log.
+    fn analyze(
+        &self,
+        input: &Path,
+        filter: &str,
+        probe: &Probe,
+        on_progress: &mut dyn FnMut(f64),
+    ) -> Result<String, Failure> {
+        let mut command = args(&["-loglevel", "info", "-i"]);
+        command.push(input.into());
+        command.extend(args(&["-map", "0:a:0", "-af", filter, "-f", "null", "-"]));
+        self.run(&command, probe.duration_secs, &mut |f| {
+            on_progress(f * ANALYSIS_SHARE)
+        })
+    }
+
+    /// Writes a filtered copy of a file beside it, as the same kind of file with `suffix` in its name.
+    fn render_edit(
+        &self,
+        input: &Path,
+        filter: &str,
+        suffix: &str,
+        probe: &Probe,
+        on_progress: &mut dyn FnMut(f64),
+    ) -> Result<PathBuf, Failure> {
+        let format = Format::matching(input);
+        let dir = parent_dir(input);
+        let temp = TempFile::beside(dir, "edit")?;
+
+        let mut command = args(&["-loglevel", "error", "-y", "-i"]);
+        command.push(input.into());
+        command.extend(probe.stream_args(format));
+        command.extend(args(&["-af", filter]));
+        // loudnorm works at 192 kHz internally, so the output rate must be set explicitly.
+        if let Some(rate) = probe.sample_rate {
+            command.extend(args(&["-ar", &rate.to_string()]));
+        }
+        command.extend(format.codec_args(probe).into_iter().map(OsString::from));
+        command.extend(args(&["-f", format.muxer()]));
+        command.push(temp.0.clone().into());
+        self.run(&command, probe.duration_secs, &mut |f| {
+            on_progress(ANALYSIS_SHARE + f * (1.0 - ANALYSIS_SHARE))
+        })?;
+
+        let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+        let name = format!("{stem} {suffix}");
+        Ok(publish(&temp.0, dir, &name, format.extension())?)
+    }
+
+    /// Brings a file to the standard loudness target, keeping its format.
+    pub fn normalize(
+        &self,
+        input: &Path,
+        on_progress: &mut dyn FnMut(f64),
+    ) -> Result<PathBuf, Failure> {
+        let probe = self.probe(input)?;
+        let measure = format!("loudnorm={LOUDNORM_TARGET}:print_format=json");
+        let log = self.analyze(input, &measure, &probe, on_progress)?;
+        let loudness =
+            parse_loudness(&log).ok_or_else(|| Failure::Error(TOO_QUIET_TO_MEASURE.to_string()))?;
+        self.render_edit(
+            input,
+            &loudness.linear_filter(),
+            "normalized",
+            &probe,
+            on_progress,
+        )
+    }
+
+    /// Removes silence from the start and end of a file, keeping its format.
+    pub fn trim(&self, input: &Path, on_progress: &mut dyn FnMut(f64)) -> Result<PathBuf, Failure> {
+        let probe = self.probe(input)?;
+        let detect = format!("silencedetect=n={SILENCE_THRESHOLD}:d={SHORTEST_SILENCE}");
+        let log = self.analyze(input, &detect, &probe, on_progress)?;
+        let kept = parse_kept_range(&log, probe.duration_secs)?;
+        let mut filter = format!("atrim=start={}", kept.start);
+        if let Some(end) = kept.end {
+            filter += &format!(":end={end}");
+        }
+        filter += ",asetpts=PTS-STARTPTS";
+        self.render_edit(input, &filter, "trimmed", &probe, on_progress)
     }
 
     /// Layers the inputs into one loudness-normalized 24-bit stereo WAV beside the first input.
@@ -594,6 +747,52 @@ mod tests {
     fn ignores_cover_art_before_audio() {
         let text = "  Stream #0:0: Video: mjpeg, 500x500\n  Stream #0:1: Audio: flac, 96000 Hz, stereo, s32 (24 bit)\n";
         assert_eq!(parse_probe(text).unwrap().sample_rate, Some(96000));
+    }
+
+    fn kept(log: &str, duration: Option<f64>) -> Result<(f64, Option<f64>), String> {
+        match parse_kept_range(log, duration) {
+            Ok(range) => Ok((range.start, range.end)),
+            Err(Failure::Error(reason)) => Err(reason),
+            Err(Failure::Cancelled) => panic!("nothing cancelled this"),
+        }
+    }
+
+    #[test]
+    fn trims_silence_at_both_ends() {
+        let log = "[silencedetect @ 0] silence_start: 0\n\
+            [silencedetect @ 0] silence_end: 1.5 | silence_duration: 1.5\n\
+            [silencedetect @ 0] silence_start: 4\n\
+            [silencedetect @ 0] silence_end: 6 | silence_duration: 2\n";
+        assert_eq!(kept(log, Some(6.0)), Ok((1.5, Some(4.0))));
+    }
+
+    #[test]
+    fn leaves_silence_in_the_middle_alone() {
+        let log = "silence_start: 2\nsilence_end: 3 | silence_duration: 1\n";
+        assert_eq!(kept(log, Some(6.0)), Err(NO_SILENCE.to_string()));
+    }
+
+    #[test]
+    fn trims_an_end_silence_that_was_never_closed() {
+        let log = "silence_start: 2\nsilence_end: 3 | silence_duration: 1\nsilence_start: 5\n";
+        assert_eq!(kept(log, Some(6.0)), Ok((0.0, Some(5.0))));
+    }
+
+    #[test]
+    fn recognizes_entirely_silent_files() {
+        let log = "silence_start: 0\nsilence_end: 6 | silence_duration: 6\n";
+        assert_eq!(kept(log, Some(6.0)), Err(ALL_SILENT.to_string()));
+        assert_eq!(
+            kept("silence_start: 0\n", None),
+            Err(ALL_SILENT.to_string())
+        );
+    }
+
+    #[test]
+    fn trims_only_the_start_when_the_duration_is_unknown() {
+        let log = "silence_start: 0\nsilence_end: 1 | silence_duration: 1\n\
+            silence_start: 5\nsilence_end: 6 | silence_duration: 1\n";
+        assert_eq!(kept(log, None), Ok((1.0, None)));
     }
 
     #[test]

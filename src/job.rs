@@ -11,6 +11,8 @@ pub const NEED_TWO_FILES: &str = "Select at least two audio files to mix.";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Job {
     Convert(Format),
+    Normalize,
+    Trim,
     Mix,
 }
 
@@ -19,6 +21,8 @@ impl Job {
     pub fn queue_name(self) -> String {
         match self {
             Job::Convert(format) => format!("convert-{}", format.extension()),
+            Job::Normalize => "normalize".to_string(),
+            Job::Trim => "trim".to_string(),
             Job::Mix => "mix".to_string(),
         }
     }
@@ -87,36 +91,46 @@ struct Worker<'a> {
     engine: Engine,
     shared: &'a Shared,
     outcome: Outcome,
-    converted: usize,
+    processed: usize,
 }
 
 impl Worker<'_> {
     fn handle_batch(&mut self, batch: Vec<PathBuf>) {
         match self.job {
-            Job::Convert(format) => self.convert_all(&batch, format),
             Job::Mix => self.mix(&batch),
+            job => self.process_each(&batch, job),
         }
     }
 
-    fn convert_all(&mut self, batch: &[PathBuf], format: Format) {
+    fn process_each(&mut self, batch: &[PathBuf], job: Job) {
+        let verb = match job {
+            Job::Normalize => "Normalizing",
+            Job::Trim => "Trimming",
+            _ => "Converting",
+        };
         // Files selected while a batch is running extend the same count.
-        let total = self.converted + batch.len();
+        let total = self.processed + batch.len();
         for input in batch {
             if self.shared.is_cancelled() {
                 self.outcome.cancelled = true;
                 return;
             }
-            let heading = format!("Converting {} of {total}", self.converted + 1);
+            let heading = format!("{verb} {} of {total}", self.processed + 1);
             let name = display_name(input);
-            let finished = self.converted as f64;
+            let finished = self.processed as f64;
             let shared = self.shared;
             let mut on_progress = |file_fraction: f64| {
                 shared.report(&heading, &name, (finished + file_fraction) / total as f64);
             };
             on_progress(0.0);
-            let result = self.engine.convert(input, format, &mut on_progress);
+            let result = match job {
+                Job::Convert(format) => self.engine.convert(input, format, &mut on_progress),
+                Job::Normalize => self.engine.normalize(input, &mut on_progress),
+                Job::Trim => self.engine.trim(input, &mut on_progress),
+                Job::Mix => unreachable!("mixes are handled as a whole"),
+            };
             self.outcome.record(result, name);
-            self.converted += 1;
+            self.processed += 1;
         }
     }
 
@@ -145,7 +159,7 @@ pub fn run(job: Job, source: Source, ffmpeg: PathBuf, shared: &Shared) -> Outcom
         engine: Engine::new(ffmpeg, shared.cancel.clone()),
         shared,
         outcome: Outcome::default(),
-        converted: 0,
+        processed: 0,
     };
     match source {
         Source::Files(files) => worker.handle_batch(files),
