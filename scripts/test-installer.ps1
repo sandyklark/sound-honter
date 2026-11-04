@@ -53,9 +53,11 @@ function Wait-Until {
 # Waits for the result dialog, photographs it if requested, and closes it.
 function Close-AppDialog {
     param([string]$Screenshot)
-    # The progress dialog closes itself, so wait for the app to settle on one window.
-    Start-Sleep -Milliseconds 1500
-    $Found = Wait-Until { (Get-AppWindow) -ne [IntPtr]::Zero }
+    # Closing the progress dialog would cancel the job, so wait until it has given way to the result.
+    $Found = Wait-Until {
+        $Window = Get-AppWindow
+        ($Window -ne [IntPtr]::Zero) -and -not [AppWindow]::HasButton($Window, 'Cancel')
+    }
     if ($Found) {
         Start-Sleep -Milliseconds 300
         $Window = Get-AppWindow
@@ -97,13 +99,13 @@ try {
     Write-Host 'Right-click menu'
     Check 'menu key exists' (Test-Path $MenuKey)
     $Verbs = Get-ChildItem "$MenuKey\shell"
-    Check 'has five conversions and a mix' ($Verbs.Count -eq 6)
+    Check 'has every menu entry' ($Verbs.Count -eq 9)
     Check 'submenu is declared' ((Get-ItemProperty $MenuKey).PSObject.Properties.Name -contains 'SubCommands')
 
     $Drum = Join-Path $Audio 'drum.wav'
     $Blunt = Join-Path $Audio 'blunt.wav'
     $Selection = [string[]]@($Drum, $Blunt)
-    $Wanted = 'Convert to MP3', 'Convert to WAV', 'Convert to FLAC', 'Convert to OGG', 'Convert to M4A', 'Mix selected files' | ForEach-Object { "Sound Honter > $_" }
+    $Wanted = 'Convert to MP3', 'Convert to WAV', 'Convert to FLAC', 'Convert to OGG', 'Convert to M4A', 'Normalize loudness', 'Trim silence', 'Mix selected files', 'Mix with options...' | ForEach-Object { "Sound Honter > $_" }
     foreach ($Files in @{ Name = 'one file'; Paths = [string[]]@($Drum) }, @{ Name = 'two files'; Paths = $Selection }) {
         $Items = @([ShellMenu]::Items($Files.Paths) | Where-Object { $_ -like 'Sound Honter > *' })
         Check "menu is complete and in order for $($Files.Name)" (($Items -join '|') -eq ($Wanted -join '|'))
@@ -111,7 +113,7 @@ try {
 
     Write-Host 'Running the registered commands'
     foreach ($Verb in $Verbs) {
-        if ($Verb.PSChildName -eq '60mix') { continue }
+        if ($Verb.PSChildName -notmatch '^[1-5]0') { continue }
         $Format = $Verb.PSChildName.Substring(2)
         $Command = (Get-ItemProperty "$($Verb.PSPath)\command").'(default)'
         $Exit = Invoke-Registered $Command $Drum
@@ -157,14 +159,11 @@ try {
         $Copy
     }
     [ShellMenu]::Click([string[]]$Many, 'Sound Honter > Mix selected files')
-    # A bigger job takes longer, so wait for its result before looking for the summary dialog.
-    Check '15 files: mix finishes' (Wait-Until { (Find-Audio 'many*mix*.wav').Count -ge 1 })
     Check '15 files: mix summary dialog appears and closes' (Close-AppDialog '')
     $Mixes = @(Find-Audio 'many*mix*.wav')
     Write-Host "  info  mixes made from 15 files: $($Mixes.Name -join ', ')"
     Check '15 files: exactly one mix of all of them' ($Mixes.Count -eq 1 -and $Mixes[0].Name -like '* + 14 more mix*')
     [ShellMenu]::Click([string[]]$Many, 'Sound Honter > Convert to M4A')
-    Check '15 files: convert finishes' (Wait-Until { (Find-Audio 'many*.m4a').Count -ge 15 })
     Check '15 files: convert summary dialog appears and closes' (Close-AppDialog 'convert-15')
     Check '15 files: every file converted exactly once' ((Find-Audio 'many*.m4a').Count -eq 15 -and (Find-Audio 'many*(*.m4a').Count -eq 0)
     $Extra = Join-Path $Audio 'many16.wav'
@@ -177,7 +176,7 @@ try {
     $Long = Join-Path $Audio 'long.wav'
     & (Join-Path $InstallDir 'ffmpeg\ffmpeg.exe') -hide_banner -loglevel error -f lavfi -i 'sine=440:d=3600:r=44100' -y $Long
     [ShellMenu]::Click([string[]]@($Long), 'Sound Honter > Convert to FLAC')
-    Check 'progress dialog appears' (Wait-Until { (Get-AppWindow) -ne [IntPtr]::Zero })
+    Check 'progress dialog appears' (Wait-Until { $Window = Get-AppWindow; ($Window -ne [IntPtr]::Zero) -and [AppWindow]::HasButton($Window, 'Cancel') })
     Start-Sleep -Milliseconds 1500
     if ($ScreenshotDir) { [AppWindow]::Capture((Get-AppWindow), (Join-Path $ScreenshotDir 'progress.png')) }
     [AppWindow]::Close((Get-AppWindow))

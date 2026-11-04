@@ -158,6 +158,9 @@ public static class ShellMenu
 
 public static class AppWindow
 {
+    delegate bool ChildVisitor(IntPtr child, IntPtr data);
+    [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr window, ChildVisitor visit, IntPtr data);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr window, StringBuilder text, int size);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out Rect rect);
     [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr window, IntPtr dc, uint flags);
     [DllImport("user32.dll")] static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
@@ -167,6 +170,20 @@ public static class AppWindow
 
     const uint PW_RENDERFULLCONTENT = 2;
     const uint WM_CLOSE = 0x0010;
+
+    /// Whether a dialog has a button with this label. The progress dialog is the one with Cancel.
+    public static bool HasButton(IntPtr window, string label)
+    {
+        bool found = false;
+        EnumChildWindows(window, delegate (IntPtr child, IntPtr data)
+        {
+            StringBuilder text = new StringBuilder(64);
+            GetWindowText(child, text, text.Capacity);
+            if (text.ToString().Replace("&", "") == label) found = true;
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
 
     /// Saves an image of just this window, whatever is on top of it.
     public static void Capture(IntPtr window, string path)
