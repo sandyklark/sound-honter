@@ -2,3 +2,4 @@
 /dist/
 # Fetched and checksum-verified by scripts/fetch-ffmpeg.ps1
 /third_party/ffmpeg/ffmpeg.exe
+/tests/fixtures/

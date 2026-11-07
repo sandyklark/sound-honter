@@ -30,9 +30,43 @@ impl Scratch {
         Scratch(dir)
     }
 
+    /// Copies a sample from tests/fixtures. The samples aren't published, so where they're
+    /// missing, a generated sound with the same length, rate, depth and channels stands in.
     fn copy(&self, fixture: &str, name: &str) -> PathBuf {
         let target = self.0.join(name);
-        fs::copy(repo_path(&format!("tests/fixtures/{fixture}")), &target).unwrap();
+        let real = repo_path(&format!("tests/fixtures/{fixture}"));
+        if real.is_file() {
+            fs::copy(real, &target).unwrap();
+            return target;
+        }
+        let (secs, rate, codec) = match fixture {
+            "blunt.wav" => (1.52, 48000, "pcm_s24le"),
+            "drum.wav" => (1.94, 44100, "pcm_s16le"),
+            other => panic!("no stand-in for {other}"),
+        };
+        // A hit that decays away, like a one-shot sample.
+        let source = format!(
+            "anoisesrc=d={secs}:r={rate}:a=0.7:seed=7,afade=t=out:d={secs}:curve=exp,             aformat=channel_layouts=stereo"
+        );
+        let status = Command::new(ffmpeg())
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg(&source)
+            .args(["-c:a", codec])
+            .arg(&target)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "failed to generate a stand-in for {fixture}"
+        );
         target
     }
 
