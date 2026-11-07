@@ -1,0 +1,31 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Inno Setup
+        run: choco install innosetup --version 6.3.3 --yes --no-progress
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check, test and build the installer
+        run: scripts\build.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: dist\*.exe
+          if-no-files-found: error
