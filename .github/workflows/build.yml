@@ -22,7 +22,7 @@ jobs:
       - name: Check, test and build the installer
         run: scripts\build.ps1
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: installer
           path: dist\*.exe
