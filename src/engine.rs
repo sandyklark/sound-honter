@@ -433,13 +433,16 @@ fn publish(temp: &Path, dir: &Path, stem: &str, extension: &str) -> io::Result<P
     unreachable!()
 }
 
+const TEMP_PREFIX: &str = ".soundhonter-";
+
 /// Removes the temp file when dropped, if it hasn't been moved into place.
 struct TempFile(PathBuf);
 
 impl TempFile {
     /// Creates the file, which also confirms up front that the folder can be written to.
     fn beside(dir: &Path, label: &str) -> Result<TempFile, Failure> {
-        let path = dir.join(format!(".soundhonter-{}-{label}.tmp", std::process::id()));
+        remove_abandoned_temp_files(dir);
+        let path = dir.join(format!("{TEMP_PREFIX}{}-{label}.tmp", std::process::id()));
         match fs::File::create(&path) {
             Ok(_) => Ok(TempFile(path)),
             Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Err(Failure::Error(
@@ -454,6 +457,32 @@ impl Drop for TempFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
     }
+}
+
+/// Deletes temp files left in `dir` by runs of Sound Honter that were killed mid-job.
+/// Files whose run might still be going are left alone.
+fn remove_abandoned_temp_files(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = abandoned_temp_owner(&name.to_string_lossy()) else {
+            continue;
+        };
+        if pid != std::process::id() && !crate::system::is_running(pid) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// The process id in a Sound Honter temp file name, like `.soundhonter-1234-mix.tmp`.
+fn abandoned_temp_owner(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix(TEMP_PREFIX)?;
+    if !rest.ends_with(".tmp") {
+        return None;
+    }
+    rest.split('-').next()?.parse().ok()
 }
 
 fn parent_dir(path: &Path) -> &Path {
@@ -509,6 +538,7 @@ impl Engine {
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| Failure::Error(format!("Could not start FFmpeg: {e}")))?;
+        crate::system::end_with_us(&child);
 
         let elapsed_us = Arc::new(AtomicI64::new(0));
         let stdout = child.stdout.take().expect("stdout is piped");
@@ -814,6 +844,21 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_temp_file_owners() {
+        assert_eq!(
+            abandoned_temp_owner(".soundhonter-1234-mix.tmp"),
+            Some(1234)
+        );
+        assert_eq!(
+            abandoned_temp_owner(".soundhonter-1234-a-b.tmp"),
+            Some(1234)
+        );
+        assert_eq!(abandoned_temp_owner(".soundhonter-x-mix.tmp"), None);
+        assert_eq!(abandoned_temp_owner(".soundhonter-1234-mix.wav"), None);
+        assert_eq!(abandoned_temp_owner("song.tmp"), None);
+    }
 
     const WAV_24: &str = "Input #0, wav, from 'a.wav':\n  Duration: 00:01:01.52, bitrate: 2310 kb/s\n  \
         Stream #0:0: Audio: pcm_s24le ([1][0][0][0] / 0x0001), 48000 Hz, stereo, s32 (24 bit), 2304 kb/s\n";

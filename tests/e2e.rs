@@ -1028,3 +1028,59 @@ fn normalize_works_on_every_format_for_clips_under_three_seconds() {
         assert!(peak(&result) <= -2.0, "{format}: peak {}", peak(&result));
     }
 }
+
+#[test]
+fn temp_files_from_killed_runs_are_cleaned_up_but_live_ones_kept() {
+    let scratch = Scratch::new();
+    let source = scratch.copy("blunt.wav", "blunt.wav");
+    // Real process ids are multiples of 4, so this one can never be running.
+    let dead = scratch.0.join(".soundhonter-999999-mix.tmp");
+    let live = scratch
+        .0
+        .join(format!(".soundhonter-{}-mix.tmp", std::process::id()));
+    fs::write(&dead, b"left over").unwrap();
+    fs::write(&live, b"in use").unwrap();
+
+    assert_success(&scratch.run(&["convert", "mp3"], &[&source]));
+
+    assert!(!dead.exists(), "the leftover was not removed");
+    assert!(live.exists(), "a running job's temp file was removed");
+}
+
+#[test]
+fn killing_the_app_also_stops_ffmpeg() {
+    let scratch = Scratch::new();
+    let long = scratch.generate("sine=440:d=3600:r=44100", "long.wav");
+    let mut app = scratch
+        .app(&["convert", "flac", "--no-ui"], &[&long])
+        .spawn()
+        .unwrap();
+
+    let temp_size = || {
+        fs::read_dir(&scratch.0)
+            .unwrap()
+            .flatten()
+            .find(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .and_then(|entry| fs::metadata(entry.path()).ok())
+            .map_or(0, |metadata| metadata.len())
+    };
+    let started = std::time::Instant::now();
+    while temp_size() == 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "FFmpeg never started writing"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    app.kill().unwrap();
+    app.wait().unwrap();
+
+    std::thread::sleep(Duration::from_millis(500));
+    let before = temp_size();
+    std::thread::sleep(Duration::from_millis(1000));
+    assert_eq!(
+        temp_size(),
+        before,
+        "FFmpeg kept writing after the app was killed"
+    );
+}

@@ -6,8 +6,8 @@
 
 #define AppName "Sound Honter"
 #define AppExe "soundhonter.exe"
-; TODO(release): replace with your legal or trading name. Shown in Apps > Installed apps.
-#define Publisher "Sound Honter"
+; Shown in Apps > Installed apps.
+#define Publisher "Hontworks"
 
 #ifdef Sign
   #define SignFlag "signonce"
