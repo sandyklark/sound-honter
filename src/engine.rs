@@ -11,12 +11,13 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use crate::settings::{
+    Channels, LossyQuality, Mp3Quality, OutputFolder, SampleRate, Settings, WavDepth,
+    SUBFOLDER_NAME,
+};
+
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Loudness target for mixes.
-const LOUDNORM_TARGET: &str = "I=-16:TP=-3:LRA=11";
-/// Anything quieter than this counts as silence when trimming.
-const SILENCE_THRESHOLD: &str = "-60dB";
 /// Silence shorter than this at either end is left alone, in seconds.
 const SHORTEST_SILENCE: f64 = 0.02;
 /// How far apart two times can be and still count as the same moment, in seconds.
@@ -83,21 +84,59 @@ impl Format {
             .unwrap_or(Format::Wav)
     }
 
-    /// Settings for converting to this format. MP3 keeps the original delivery spec.
-    fn conversion_args(self, source: &Probe) -> Vec<&'static str> {
-        let mut settings = self.codec_args(source);
-        if self == Format::Mp3 {
-            settings.extend(["-ar", "44100", "-ac", "2"]);
+    /// Encoder, sample rate and channel settings for writing this format.
+    ///
+    /// `natural_rate` is the rate to keep when the settings say to keep the source's. Filtered
+    /// audio has to state it, because `loudnorm` works at 192 kHz internally.
+    ///
+    /// New MP3s, from converting or mixing, get the original delivery spec of 44.1 kHz stereo
+    /// unless the settings say otherwise. Edits of an MP3 keep it as it was.
+    fn output_args(
+        self,
+        source: &Probe,
+        natural_rate: Option<u32>,
+        settings: &Settings,
+        is_new: bool,
+    ) -> Vec<OsString> {
+        let mut output = args(&self.codec_args(source, settings));
+        let delivery_spec = is_new && self == Format::Mp3;
+        let rate = match settings.sample_rate {
+            SampleRate::Keep if delivery_spec => Some(44_100),
+            SampleRate::Keep => natural_rate,
+            SampleRate::Hz44100 => Some(44_100),
+            SampleRate::Hz48000 => Some(48_000),
+        };
+        if let Some(rate) = rate {
+            output.extend(args(&["-ar", &rate.to_string()]));
         }
-        settings
+        let channels = match settings.channels {
+            Channels::Keep if delivery_spec => Some("2"),
+            Channels::Keep => None,
+            Channels::Stereo => Some("2"),
+            Channels::Mono => Some("1"),
+        };
+        if let Some(channels) = channels {
+            output.extend(args(&["-ac", channels]));
+        }
+        output
     }
 
-    /// Encoder settings, which keep the source's sample rate and channels.
-    fn codec_args(self, source: &Probe) -> Vec<&'static str> {
+    fn codec_args(self, source: &Probe, settings: &Settings) -> Vec<&'static str> {
+        let lossy = settings.lossy_quality;
         match self {
-            Format::Mp3 => vec!["-c:a", "libmp3lame", "-b:a", "192k"],
-            Format::Wav if source.is_high_depth => vec!["-c:a", "pcm_s24le"],
-            Format::Wav => vec!["-c:a", "pcm_s16le"],
+            Format::Mp3 => match settings.mp3_quality {
+                Mp3Quality::Cbr128 => vec!["-c:a", "libmp3lame", "-b:a", "128k"],
+                Mp3Quality::Cbr192 => vec!["-c:a", "libmp3lame", "-b:a", "192k"],
+                Mp3Quality::Cbr256 => vec!["-c:a", "libmp3lame", "-b:a", "256k"],
+                Mp3Quality::Cbr320 => vec!["-c:a", "libmp3lame", "-b:a", "320k"],
+                Mp3Quality::VbrHigh => vec!["-c:a", "libmp3lame", "-q:a", "0"],
+            },
+            Format::Wav => match settings.wav_depth {
+                WavDepth::MatchSource if source.is_high_depth => vec!["-c:a", "pcm_s24le"],
+                WavDepth::MatchSource | WavDepth::Bits16 => vec!["-c:a", "pcm_s16le"],
+                WavDepth::Bits24 => vec!["-c:a", "pcm_s24le"],
+                WavDepth::Float32 => vec!["-c:a", "pcm_f32le"],
+            },
             // Filtered audio would otherwise ask for 32-bit FLAC, which the encoder refuses.
             Format::Flac if source.is_high_depth => {
                 vec![
@@ -110,8 +149,16 @@ impl Format {
                 ]
             }
             Format::Flac => vec!["-c:a", "flac", "-sample_fmt", "s16"],
-            Format::Ogg => vec!["-c:a", "libvorbis", "-q:a", "6"],
-            Format::M4a => vec!["-c:a", "aac", "-b:a", "192k"],
+            Format::Ogg => match lossy {
+                LossyQuality::High => vec!["-c:a", "libvorbis", "-q:a", "6"],
+                LossyQuality::Medium => vec!["-c:a", "libvorbis", "-q:a", "4"],
+                LossyQuality::Low => vec!["-c:a", "libvorbis", "-q:a", "2"],
+            },
+            Format::M4a => match lossy {
+                LossyQuality::High => vec!["-c:a", "aac", "-b:a", "192k"],
+                LossyQuality::Medium => vec!["-c:a", "aac", "-b:a", "128k"],
+                LossyQuality::Low => vec!["-c:a", "aac", "-b:a", "96k"],
+            },
         }
     }
 }
@@ -267,9 +314,9 @@ impl Loudness {
     ///
     /// `loudnorm` hands over a clip under 3 seconds as one huge frame, which the FLAC encoder
     /// rejects, so the output is split back into normal-sized frames.
-    fn linear_filter(&self) -> String {
+    fn linear_filter(&self, target: &str) -> String {
         format!(
-            "loudnorm={LOUDNORM_TARGET}:measured_I={:.2}:measured_TP={:.2}:measured_LRA={:.2}:             measured_thresh={:.2}:offset={:.2}:linear=true,asetnsamples=n=4096:p=0",
+            "loudnorm={target}:measured_I={:.2}:measured_TP={:.2}:measured_LRA={:.2}:measured_thresh={:.2}:offset={:.2}:linear=true,asetnsamples=n=4096:p=0",
             self.input_i.clamp(-99.0, 0.0),
             self.input_tp.clamp(-99.0, 99.0),
             self.input_lra.clamp(0.0, 99.0),
@@ -499,11 +546,51 @@ fn args(values: &[&str]) -> Vec<OsString> {
 pub struct Engine {
     ffmpeg: PathBuf,
     cancel: Arc<AtomicBool>,
+    settings: Settings,
 }
 
 impl Engine {
     pub fn new(ffmpeg: PathBuf, cancel: Arc<AtomicBool>) -> Engine {
-        Engine { ffmpeg, cancel }
+        Engine {
+            ffmpeg,
+            cancel,
+            settings: Settings::default(),
+        }
+    }
+
+    pub fn with_settings(self, settings: Settings) -> Engine {
+        Engine { settings, ..self }
+    }
+
+    /// Where new files made from files in `source_dir` go, creating the folder if needed.
+    fn output_dir(&self, source_dir: &Path) -> Result<PathBuf, Failure> {
+        let dir = match self.settings.output_folder {
+            OutputFolder::Beside => return Ok(source_dir.to_path_buf()),
+            // Working on files that are already in the folder shouldn't nest another one.
+            OutputFolder::Subfolder if source_dir.ends_with(SUBFOLDER_NAME) => {
+                return Ok(source_dir.to_path_buf())
+            }
+            OutputFolder::Subfolder => source_dir.join(SUBFOLDER_NAME),
+        };
+        match fs::create_dir_all(&dir) {
+            Ok(()) => Ok(dir),
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Err(Failure::Error(
+                format!("Can't save in this folder: {}", source_dir.display()),
+            )),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Moves a finished temp file into place under `stem` plus the user's name suffix.
+    fn publish(
+        &self,
+        temp: &TempFile,
+        dir: &Path,
+        stem: &str,
+        format: Format,
+    ) -> Result<PathBuf, Failure> {
+        let stem = format!("{stem}{}", self.settings.name_suffix);
+        Ok(publish(&temp.0, dir, &stem, format.extension())?)
     }
 
     /// Locates the bundled FFmpeg, installed beside the app.
@@ -621,24 +708,19 @@ impl Engine {
         on_progress: &mut dyn FnMut(f64),
     ) -> Result<PathBuf, Failure> {
         let probe = self.probe(input)?;
-        let dir = parent_dir(input);
-        let temp = TempFile::beside(dir, "convert")?;
+        let dir = self.output_dir(parent_dir(input))?;
+        let temp = TempFile::beside(&dir, "convert")?;
 
         let mut command = args(&["-loglevel", "error", "-y", "-i"]);
         command.push(input.into());
         command.extend(probe.stream_args(format));
-        command.extend(
-            format
-                .conversion_args(&probe)
-                .into_iter()
-                .map(OsString::from),
-        );
+        command.extend(format.output_args(&probe, None, &self.settings, true));
         command.extend(args(&["-f", format.muxer()]));
         command.push(temp.0.clone().into());
         self.run(&command, probe.duration_secs, on_progress)?;
 
         let stem = input.file_stem().unwrap_or_default().to_string_lossy();
-        Ok(publish(&temp.0, dir, &stem, format.extension())?)
+        self.publish(&temp, &dir, &stem, format)
     }
 
     /// Runs an analysis pass over a file's audio, returning FFmpeg's log.
@@ -667,18 +749,14 @@ impl Engine {
         on_progress: &mut dyn FnMut(f64),
     ) -> Result<PathBuf, Failure> {
         let format = Format::matching(input);
-        let dir = parent_dir(input);
-        let temp = TempFile::beside(dir, "edit")?;
+        let dir = self.output_dir(parent_dir(input))?;
+        let temp = TempFile::beside(&dir, "edit")?;
 
         let mut command = args(&["-loglevel", "error", "-y", "-i"]);
         command.push(input.into());
         command.extend(probe.stream_args(format));
         command.extend(args(&["-af", filter]));
-        // loudnorm works at 192 kHz internally, so the output rate must be set explicitly.
-        if let Some(rate) = probe.sample_rate {
-            command.extend(args(&["-ar", &rate.to_string()]));
-        }
-        command.extend(format.codec_args(probe).into_iter().map(OsString::from));
+        command.extend(format.output_args(probe, probe.sample_rate, &self.settings, false));
         command.extend(args(&["-f", format.muxer()]));
         command.push(temp.0.clone().into());
         self.run(&command, probe.duration_secs, &mut |f| {
@@ -686,8 +764,7 @@ impl Engine {
         })?;
 
         let stem = input.file_stem().unwrap_or_default().to_string_lossy();
-        let name = format!("{stem} {suffix}");
-        Ok(publish(&temp.0, dir, &name, format.extension())?)
+        self.publish(&temp, &dir, &format!("{stem} {suffix}"), format)
     }
 
     /// Brings a file to the standard loudness target, keeping its format.
@@ -697,13 +774,14 @@ impl Engine {
         on_progress: &mut dyn FnMut(f64),
     ) -> Result<PathBuf, Failure> {
         let probe = self.probe(input)?;
-        let measure = format!("loudnorm={LOUDNORM_TARGET}:print_format=json");
+        let target = self.settings.loudnorm_target();
+        let measure = format!("loudnorm={target}:print_format=json");
         let log = self.analyze(input, &measure, &probe, on_progress)?;
         let loudness =
             parse_loudness(&log).ok_or_else(|| Failure::Error(TOO_QUIET_TO_MEASURE.to_string()))?;
         self.render_edit(
             input,
-            &loudness.linear_filter(),
+            &loudness.linear_filter(&target),
             "normalized",
             &probe,
             on_progress,
@@ -713,7 +791,8 @@ impl Engine {
     /// Removes silence from the start and end of a file, keeping its format.
     pub fn trim(&self, input: &Path, on_progress: &mut dyn FnMut(f64)) -> Result<PathBuf, Failure> {
         let probe = self.probe(input)?;
-        let detect = format!("silencedetect=n={SILENCE_THRESHOLD}:d={SHORTEST_SILENCE}");
+        let threshold = self.settings.silence_threshold.key();
+        let detect = format!("silencedetect=n={threshold}dB:d={SHORTEST_SILENCE}");
         let log = self.analyze(input, &detect, &probe, on_progress)?;
         let kept = parse_kept_range(&log, probe.duration_secs)?;
         let mut filter = format!("atrim=start={}", kept.start);
@@ -763,8 +842,9 @@ impl Engine {
         let graph = mix_graph(inputs.len(), sample_rate, measuring_gain);
 
         // Pass 1: measure, so that pass 2 can apply one clean gain instead of riding the levels.
+        let target = self.settings.loudnorm_target();
         let measure = if options.normalize {
-            format!("volumedetect,loudnorm={LOUDNORM_TARGET}:print_format=json")
+            format!("volumedetect,loudnorm={target}:print_format=json")
         } else {
             "volumedetect".to_string()
         };
@@ -785,7 +865,7 @@ impl Engine {
 
         let loudness = parse_loudness(&log).filter(|_| options.normalize);
         let final_graph = match loudness {
-            Some(loudness) => format!("{graph};[mixed]{}[out]", loudness.linear_filter()),
+            Some(loudness) => format!("{graph};[mixed]{}[out]", loudness.linear_filter(&target)),
             // Not normalizing, or the mix is too short or quiet for loudness to be measured.
             None => {
                 let gain = parse_peak(&log).map_or(1.0, |peak| {
@@ -799,8 +879,8 @@ impl Engine {
         };
 
         // Pass 2: render.
-        let dir = parent_dir(&inputs[0]);
-        let temp = TempFile::beside(dir, "mix")?;
+        let dir = self.output_dir(parent_dir(&inputs[0]))?;
+        let temp = TempFile::beside(&dir, "mix")?;
         let format = options.format;
         let settings = Probe {
             is_high_depth: true,
@@ -816,28 +896,15 @@ impl Engine {
             // A mix isn't the first file, so it shouldn't inherit that file's title and artist.
             "-map_metadata",
             "-1",
-            // loudnorm works at 192 kHz internally, so the output rate must be set explicitly.
-            "-ar",
-            &sample_rate.to_string(),
         ]));
-        render.extend(
-            format
-                .conversion_args(&settings)
-                .into_iter()
-                .map(OsString::from),
-        );
+        render.extend(format.output_args(&settings, Some(sample_rate), &self.settings, true));
         render.extend(args(&["-f", format.muxer()]));
         render.push(temp.0.clone().into());
         self.run(&render, duration, &mut |f| {
             on_progress(ANALYSIS_SHARE + f * (1.0 - ANALYSIS_SHARE))
         })?;
 
-        Ok(publish(
-            &temp.0,
-            dir,
-            &mix_stem(inputs),
-            format.extension(),
-        )?)
+        self.publish(&temp, &dir, &mix_stem(inputs), format)
     }
 }
 
@@ -1013,8 +1080,9 @@ mod tests {
             input_thresh: 1.0,
             target_offset: 0.0,
         }
-        .linear_filter();
+        .linear_filter("I=-16:TP=-3:LRA=11");
         assert!(filter.contains("measured_I=0.00:"), "{filter}");
+        assert!(!filter.contains(' '), "{filter}");
         assert!(filter.contains("measured_TP=-99.00:"), "{filter}");
         assert!(filter.contains("measured_thresh=0.00:"), "{filter}");
     }

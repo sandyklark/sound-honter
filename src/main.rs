@@ -7,6 +7,7 @@ mod ui;
 use soundhonter::engine::{Engine, Format, MixOptions};
 use soundhonter::job::{self, Job, Outcome, Shared, Source};
 use soundhonter::queue;
+use soundhonter::settings::Settings;
 use std::ffi::OsString;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -196,9 +197,10 @@ fn execute(request: Request) -> ExitCode {
     };
 
     let ffmpeg = Engine::locate_ffmpeg();
+    let settings = Settings::load(&data_dir());
     let shared = Arc::new(Shared::default());
     if no_ui {
-        return report(&job::run(job, source, ffmpeg, &shared), true);
+        return report(&job::run(job, source, ffmpeg, settings, &shared), true);
     }
 
     let worker = {
@@ -212,7 +214,7 @@ fn execute(request: Request) -> ExitCode {
                 }
             }
             let finish = Finish(shared);
-            job::run(job, source, ffmpeg, &finish.0)
+            job::run(job, source, ffmpeg, settings, &finish.0)
         })
     };
     let initial_heading = match job {

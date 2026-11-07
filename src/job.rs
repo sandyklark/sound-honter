@@ -2,6 +2,7 @@
 
 use crate::engine::{Engine, Failure, Format, MixOptions};
 use crate::queue::Runner;
+use crate::settings::Settings;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -160,10 +161,16 @@ impl Worker<'_> {
     }
 }
 
-pub fn run(job: Job, source: Source, ffmpeg: PathBuf, shared: &Shared) -> Outcome {
+pub fn run(
+    job: Job,
+    source: Source,
+    ffmpeg: PathBuf,
+    settings: Settings,
+    shared: &Shared,
+) -> Outcome {
     let mut worker = Worker {
         job,
-        engine: Engine::new(ffmpeg, shared.cancel.clone()),
+        engine: Engine::new(ffmpeg, shared.cancel.clone()).with_settings(settings),
         shared,
         outcome: Outcome::default(),
         processed: 0,

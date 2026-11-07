@@ -107,6 +107,11 @@ impl Scratch {
         self.app(&args, files).output().unwrap()
     }
 
+    /// Saves settings the way the settings window does, for the app to pick up.
+    fn settings(&self, text: &str) {
+        fs::write(self.0.join("data").join("settings.ini"), text).unwrap();
+    }
+
     /// Names of the files in the directory, excluding test bookkeeping.
     fn files(&self) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(&self.0)
@@ -1117,4 +1122,113 @@ fn killing_the_app_also_stops_ffmpeg() {
         before,
         "FFmpeg kept writing after the app was killed"
     );
+}
+
+#[test]
+fn mp3_follows_the_quality_rate_and_channel_settings() {
+    let scratch = Scratch::new();
+    scratch.settings("mp3_quality = 320\nsample_rate = 48000\nchannels = mono\n");
+    let input = scratch.copy("drum.wav", "drum.wav");
+    let output = scratch.run(&["convert", "mp3"], &[&input]);
+    assert_success(&output);
+    let info = stream_info(&printed_output(&output));
+    assert!(info.contains("48000 Hz, mono"), "{info}");
+    assert!(info.contains("320 kb/s"), "{info}");
+}
+
+#[test]
+fn wav_follows_the_bit_depth_setting_everywhere() {
+    for (depth, codec) in [
+        ("16", "pcm_s16le"),
+        ("24", "pcm_s24le"),
+        ("32f", "pcm_f32le"),
+    ] {
+        let scratch = Scratch::new();
+        scratch.settings(&format!("wav_depth = {depth}\n"));
+        let a = scratch.copy("blunt.wav", "a.wav");
+        let b = scratch.copy("drum.wav", "b.wav");
+        let normalized = scratch.run(&["normalize"], &[&a]);
+        let mixed = scratch.run(&["mix"], &[&a, &b]);
+        for output in [normalized, mixed] {
+            assert_success(&output);
+            let info = stream_info(&printed_output(&output));
+            assert!(info.contains(codec), "{depth}: {info}");
+        }
+    }
+}
+
+#[test]
+fn lossy_quality_setting_changes_the_bitrate() {
+    let scratch = Scratch::new();
+    scratch.settings("lossy_quality = medium\n");
+    let input = scratch.copy("drum.wav", "drum.wav");
+    let output = scratch.run(&["convert", "m4a"], &[&input]);
+    assert_success(&output);
+    // AAC lands near its target rather than on it.
+    let info = stream_info(&printed_output(&output));
+    let line = info.lines().find(|l| l.contains("Audio: aac")).unwrap();
+    let kbps: f64 = line
+        .split(", ")
+        .find_map(|field| field.split_once(" kb/s")?.0.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no bitrate in: {line}"));
+    assert!((110.0..145.0).contains(&kbps), "{line}");
+}
+
+#[test]
+fn normalize_and_mix_follow_the_loudness_target() {
+    let scratch = Scratch::new();
+    scratch.settings("loudness_target = -23\n");
+    let a = scratch.generate("sine=440:d=6,volume=0.05", "a.wav");
+    let b = scratch.generate("sine=660:d=6,volume=0.05", "b.wav");
+    let normalized = scratch.run(&["normalize"], &[&a]);
+    let mixed = scratch.run(&["mix"], &[&a, &b]);
+    for output in [normalized, mixed] {
+        assert_success(&output);
+        let loudness = integrated_loudness(&printed_output(&output));
+        assert!((loudness + 23.0).abs() < 1.0, "came out at {loudness} LUFS");
+    }
+}
+
+#[test]
+fn a_higher_silence_threshold_also_trims_quiet_noise() {
+    // Noise at about -50 dB, then a tone.
+    let scratch = Scratch::new();
+    let input = scratch.generate(
+        "anoisesrc=d=1:a=0.003:r=44100[n];sine=440:d=2:r=44100[t];[n][t]concat=n=2:v=0:a=1",
+        "take.wav",
+    );
+    let output = scratch.run(&["trim"], &[&input]);
+    assert!(
+        !output.status.success(),
+        "-60 dB shouldn't count the noise as silence"
+    );
+
+    scratch.settings("silence_threshold = -40\n");
+    let output = scratch.run(&["trim"], &[&input]);
+    assert_success(&output);
+    let kept = duration(&printed_output(&output));
+    assert!((kept - 2.0).abs() < 0.1, "kept {kept} s");
+}
+
+#[test]
+fn output_folder_and_name_suffix_apply_to_every_kind_of_file() {
+    let scratch = Scratch::new();
+    scratch.settings("output_folder = subfolder\nname_suffix =  v2\n");
+    let a = scratch.copy("blunt.wav", "a.wav");
+    let b = scratch.copy("drum.wav", "b.wav");
+    assert_success(&scratch.run(&["convert", "mp3"], &[&a]));
+    assert_success(&scratch.run(&["normalize"], &[&a]));
+    assert_success(&scratch.run(&["mix"], &[&a, &b]));
+
+    let folder = scratch.0.join("Sound Honter");
+    for name in ["a v2.mp3", "a normalized v2.wav", "a + b mix v2.wav"] {
+        assert!(folder.join(name).is_file(), "missing {name}");
+    }
+    assert_eq!(scratch.files(), ["Sound Honter", "a.wav", "b.wav"]);
+
+    // Files already in the folder don't get a folder of their own.
+    let inside = folder.join("a v2.mp3");
+    let output = scratch.run(&["convert", "wav"], &[&inside]);
+    assert_success(&output);
+    assert_eq!(printed_output(&output), folder.join("a v2 v2.wav"));
 }
