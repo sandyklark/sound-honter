@@ -46,7 +46,7 @@ SignedUninstaller=yes
 
 [Files]
 Source: "..\target\release\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion {#SignFlag}
-Source: "..LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "..\THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\third_party\ffmpeg\ffmpeg.exe"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion
 Source: "..\third_party\ffmpeg\LICENSE.txt"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion
