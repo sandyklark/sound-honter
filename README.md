@@ -77,3 +77,8 @@ cargo +1.99.1-x86_64-pc-windows-gnu test
 | `examples/stamp.rs` | Build tool that adds the icon and version info to the exe |
 | `packaging/sound-honter.iss` | Installer, including the right-click menu entries |
 | `tests/e2e.rs` | Runs the real app and FFmpeg, then measures the audio that comes out |
+
+## License
+
+Sound Honter is released under the [MIT License](LICENSE). It runs FFmpeg, which is licensed
+separately under the GPL; see [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt).

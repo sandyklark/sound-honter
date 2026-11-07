@@ -4,6 +4,7 @@ version = "1.0.0"
 edition = "2021"
 description = "Convert and mix audio files from the Windows right-click menu"
 publish = false
+license = "MIT"
 
 [lib]
 path = "src/lib.rs"
