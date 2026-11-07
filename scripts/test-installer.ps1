@@ -71,6 +71,13 @@ function Close-AppDialog {
     $Found
 }
 
+# Answers the mix options dialog with whatever it remembers.
+function Confirm-MixOptions {
+    $Found = Wait-Until { $Window = Get-AppWindow; ($Window -ne [IntPtr]::Zero) -and [AppWindow]::HasButton($Window, 'Mix') }
+    if ($Found) { [AppWindow]::Click((Get-AppWindow), 'Mix') }
+    $Found
+}
+
 function Find-Audio { param([string]$Filter) @(Get-ChildItem -LiteralPath $Audio -Filter $Filter -Force) }
 
 $MenuKey = 'HKCU:\Software\Classes\SystemFileAssociations\audio\shell\SoundHonter'
@@ -105,7 +112,7 @@ try {
     $Drum = Join-Path $Audio 'drum.wav'
     $Blunt = Join-Path $Audio 'blunt.wav'
     $Selection = [string[]]@($Drum, $Blunt)
-    $Wanted = 'Convert to MP3', 'Convert to WAV', 'Convert to FLAC', 'Convert to OGG', 'Convert to M4A', 'Normalize loudness', 'Trim silence', 'Mix selected files', 'Mix with options...' | ForEach-Object { "Sound Honter > $_" }
+    $Wanted = 'Convert to MP3', 'Convert to WAV', 'Convert to FLAC', 'Convert to OGG', 'Convert to M4A', 'Normalize loudness', 'Trim silence', 'Mix...', 'Settings...' | ForEach-Object { "Sound Honter > $_" }
     foreach ($Files in @{ Name = 'one file'; Paths = [string[]]@($Drum) }, @{ Name = 'two files'; Paths = $Selection }) {
         $Items = @([ShellMenu]::Items($Files.Paths) | Where-Object { $_ -like 'Sound Honter > *' })
         Check "menu is complete and in order for $($Files.Name)" (($Items -join '|') -eq ($Wanted -join '|'))
@@ -124,7 +131,7 @@ try {
     Write-Host 'Send To shortcuts'
     $WScript = New-Object -ComObject WScript.Shell
     $Mix = $WScript.CreateShortcut((Join-Path $SendTo 'Sound Honter Mix.lnk'))
-    $Process = Start-Process $Mix.TargetPath -ArgumentList "$($Mix.Arguments) --no-ui `"$Blunt`" `"$Drum`"" -Wait -PassThru -WindowStyle Hidden
+    $Process = Start-Process $Mix.TargetPath -ArgumentList "mix --no-ui `"$Blunt`" `"$Drum`"" -Wait -PassThru -WindowStyle Hidden
     Check 'mix via Send To' (($Process.ExitCode -eq 0) -and (Test-Path -LiteralPath (Join-Path $Audio 'blunt + drum mix.wav')))
     $Convert = $WScript.CreateShortcut((Join-Path $SendTo 'Sound Honter Convert to MP3.lnk'))
     Check 'convert shortcut targets the app' ($Convert.TargetPath -eq (Join-Path $InstallDir 'soundhonter.exe') -and $Convert.Arguments -eq 'convert mp3')
@@ -135,11 +142,13 @@ try {
     Check 'convert: both selected files became FLAC' ((Find-Audio '*.flac').Count -eq 3)
 
     Remove-Item -LiteralPath (Join-Path $Audio 'blunt + drum mix.wav')
-    [ShellMenu]::Click($Selection, 'Sound Honter > Mix selected files')
+    Check 'mix shortcut asks how to mix' ($Mix.Arguments -eq 'mix --ask')
+    [ShellMenu]::Click($Selection, 'Sound Honter > Mix...')
+    Check 'mix: asks how to mix' (Confirm-MixOptions)
     Check 'mix: summary dialog appears and closes' (Close-AppDialog 'mix-summary')
     Check 'mix: the selection became exactly one mix' ((Find-Audio '*mix*.wav').Count -eq 1)
 
-    [ShellMenu]::Click([string[]]@($Drum), 'Sound Honter > Mix selected files')
+    [ShellMenu]::Click([string[]]@($Drum), 'Sound Honter > Mix...')
     Check 'mix: one file explains itself' (Close-AppDialog 'mix-one-file')
     Check 'mix: one file makes nothing' ((Find-Audio '*mix*.wav').Count -eq 1)
 
@@ -158,7 +167,8 @@ try {
         Copy-Item -LiteralPath $Drum $Copy
         $Copy
     }
-    [ShellMenu]::Click([string[]]$Many, 'Sound Honter > Mix selected files')
+    [ShellMenu]::Click([string[]]$Many, 'Sound Honter > Mix...')
+    Check '15 files: asks how to mix once' (Confirm-MixOptions)
     Check '15 files: mix summary dialog appears and closes' (Close-AppDialog '')
     $Mixes = @(Find-Audio 'many*mix*.wav')
     Write-Host "  info  mixes made from 15 files: $($Mixes.Name -join ', ')"
@@ -184,6 +194,13 @@ try {
     Check 'cancel stops FFmpeg' (-not (Get-Process ffmpeg -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$InstallDir*" }))
     Check 'cancel leaves no output or temp files' (((Find-Audio 'long.flac').Count -eq 0) -and ((Find-Audio '*.tmp').Count -eq 0))
     Remove-Item -LiteralPath $Long
+
+    Write-Host 'Settings window'
+    [ShellMenu]::Click($Selection, 'Sound Honter > Settings...')
+    Check 'settings: one window, even with two files selected' (Wait-Until { @(Get-Process soundhonter -ErrorAction SilentlyContinue).Count -eq 1 -and (Get-AppWindow) -ne [IntPtr]::Zero })
+    if ($ScreenshotDir) { [AppWindow]::Capture((Get-AppWindow), (Join-Path $ScreenshotDir 'settings.png')) }
+    [AppWindow]::Close((Get-AppWindow))
+    Check 'settings: closes' (Wait-Until { -not (Get-Process soundhonter -ErrorAction SilentlyContinue) })
 
     Write-Host 'About dialog'
     Start-Process (Join-Path $InstallDir 'soundhonter.exe')

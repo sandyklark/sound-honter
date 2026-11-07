@@ -170,6 +170,7 @@ public static class AppWindow
 
     const uint PW_RENDERFULLCONTENT = 2;
     const uint WM_CLOSE = 0x0010;
+    const uint BM_CLICK = 0x00F5;
 
     /// Whether a dialog has a button with this label. The progress dialog is the one with Cancel.
     public static bool HasButton(IntPtr window, string label)
@@ -200,6 +201,19 @@ public static class AppWindow
             }
             image.Save(path, ImageFormat.Png);
         }
+    }
+
+    /// Clicks the button with this label.
+    public static void Click(IntPtr window, string label)
+    {
+        EnumChildWindows(window, delegate (IntPtr child, IntPtr data)
+        {
+            StringBuilder text = new StringBuilder(64);
+            GetWindowText(child, text, text.Capacity);
+            if (text.ToString().Replace("&", "") != label) return true;
+            PostMessage(child, BM_CLICK, IntPtr.Zero, IntPtr.Zero);
+            return false;
+        }, IntPtr.Zero);
     }
 
     public static void Close(IntPtr window)

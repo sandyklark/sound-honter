@@ -15,7 +15,7 @@ const ICON_RESOURCE_ID: usize = 1;
 const PROGRESS_RANGE: isize = 1000;
 const WIDTH_DIALOG_UNITS: u32 = 260;
 
-fn wide(text: &str) -> Vec<u16> {
+pub fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 
@@ -29,15 +29,23 @@ fn base_config(title: *const u16) -> TASKDIALOGCONFIG {
     config
 }
 
+/// The app's icon, from the exe's resources. Null if it has none, as in test builds.
+pub fn app_icon() -> HICON {
+    // SAFETY: loads a shared resource, which needs no cleanup.
+    unsafe {
+        LoadImageW(
+            GetModuleHandleW(null()),
+            ICON_RESOURCE_ID as *const u16,
+            IMAGE_ICON,
+            0,
+            0,
+            LR_DEFAULTSIZE | LR_SHARED,
+        )
+    }
+}
+
 unsafe fn set_window_icon(window: HWND) {
-    let icon = LoadImageW(
-        GetModuleHandleW(null()),
-        ICON_RESOURCE_ID as *const u16,
-        IMAGE_ICON,
-        0,
-        0,
-        LR_DEFAULTSIZE | LR_SHARED,
-    );
+    let icon = app_icon();
     if !icon.is_null() {
         SendMessageW(window, WM_SETICON, ICON_BIG as WPARAM, icon as LPARAM);
         SendMessageW(window, WM_SETICON, ICON_SMALL as WPARAM, icon as LPARAM);
@@ -120,7 +128,7 @@ pub fn mix_options(file_count: usize, initial: MixOptions) -> Option<MixOptions>
 
     let title = wide(TITLE);
     let heading = wide(&format!("Mix {file_count} files"));
-    let body = wide("Choose a format for the mix. It's saved beside the first file.");
+    let body = wide("Choose a format for the mix, and whether to even out its loudness.");
     let mix_label = wide("Mix");
     let normalize_label = wide("Normalize loudness");
     let format_labels: Vec<Vec<u16>> = Format::ALL

@@ -12,11 +12,10 @@ Right-click one or more audio files and open the **Sound Honter** submenu. On Wi
   Keeps the format, sample rate, channels and tags.
 - **Trim silence:** makes `take trimmed.wav`, with silence below -60 dB cut from the start and end.
   Silence in the middle is kept.
-- **Mix selected files:** layers two or more files into one 24-bit stereo WAV, as long as the
-  longest file and normalized for loudness.
-- **Mix with options...:** the same, but asks which format to save in and whether to normalize,
-  and remembers your answer. Without normalizing, a mix keeps its natural level and is turned down
-  only if it would otherwise clip.
+- **Mix...:** layers two or more files into one, as long as the longest file. Asks which format to
+  save in and whether to normalize, and remembers your answer. Without normalizing, a mix keeps its
+  natural level and is turned down only if it would otherwise clip.
+- **Settings...:** opens the settings window, also in the Start menu as **Sound Honter Settings**.
 
 Sources that Sound Honter can read but not write, like AIFF, are normalized and trimmed to WAV.
 Sounds under 0.4 seconds are too short to measure, so they can't be normalized. Mixes of such sounds
@@ -29,39 +28,32 @@ mix isn't any one of its source files.
 Windows hides the submenu when more than 15 files are selected. For bigger selections, use
 **Send to > Sound Honter Mix** or **Sound Honter Convert to MP3**.
 
-New files are saved beside the originals, and nothing is ever overwritten: if `take.mp3` exists,
-you get `take (1).mp3`.
+New files are saved beside the originals, or in a "Sound Honter" folder beside them if you choose
+that in Settings. Nothing is ever overwritten: if `take.mp3` exists, you get `take (1).mp3`.
 
-### What the formats do
+### Settings
 
-| Format | Output |
-| --- | --- |
-| MP3 | 192 kbps, 44.1 kHz, stereo |
-| WAV | Keeps the source's sample rate and channels; 16-bit if the source is, otherwise 24-bit |
-| FLAC | Lossless; keeps the source's sample rate and channels |
-| OGG | Vorbis, quality 6 |
-| M4A | AAC, 192 kbps |
+| Setting | Choices | Default |
+| --- | --- | --- |
+| MP3 quality | 128, 192, 256 or 320 kbps, or variable (V0) | 192 kbps |
+| WAV bit depth | Match the source, 16-bit, 24-bit or 32-bit float | Match the source |
+| OGG and M4A quality | High, medium or low | High |
+| Sample rate | Keep the source's, 44.1 kHz or 48 kHz | Keep (new MP3s are 44.1 kHz) |
+| Channels | Keep the source's, stereo or mono | Keep (new MP3s are stereo) |
+| Save new files | Beside the original, or in a "Sound Honter" folder | Beside the original |
+| Add to file names | Any text, like ` v2` | Nothing |
+| Loudness target | -16, -14 or -23 LUFS | -16 LUFS |
+| Peak ceiling | -3, -2 or -1 dBTP | -3 dBTP |
+| Trim silence | Below -60, -50 or -40 dB | -60 dB |
 
-Mixes aim for -16 LUFS with peaks no higher than -3 dBTP, using one clean gain change rather than
-a limiter. Short, punchy sounds can land a little under -16 LUFS because the peak ceiling is
-reached first.
+Normalizing and mixing reach the loudness target with one clean gain change rather than a limiter.
+Short, punchy sounds can land a little under the target because the peak ceiling is reached first.
 
 ## Privacy
 
 Sound Honter doesn't collect or send any data. It never connects to the internet: everything
 happens on your PC, and the only files it writes are the new audio files beside your originals and
 its own settings in `%LOCALAPPDATA%\Sound Honter`.
-
-## Code signing policy
-
-Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
-[SignPath Foundation](https://signpath.org).
-
-- Committers and reviewers: [sandyklark](https://github.com/sandyklark)
-- Approvers: [sandyklark](https://github.com/sandyklark)
-
-Only installers built by this repository's GitHub Actions workflow, from its public source, are
-signed, and each signing request is approved by hand.
 
 ## Developing
 
@@ -87,10 +79,11 @@ cargo +1.99.1-x86_64-pc-windows-gnu test
 
 | Path | Contents |
 | --- | --- |
-| `src/engine.rs` | FFmpeg commands for converting and mixing |
+| `src/engine.rs` | FFmpeg commands for converting, normalizing, trimming and mixing |
 | `src/queue.rs` | Gathers Explorer's one-process-per-file launches into one job |
 | `src/job.rs` | Runs a job and reports progress |
-| `src/ui.rs`, `src/main.rs` | Dialogs and command line |
+| `src/settings.rs` | Settings and how they're saved |
+| `src/ui.rs`, `src/settings_window.rs`, `src/main.rs` | Dialogs, the settings window and command line |
 | `examples/stamp.rs` | Build tool that adds the icon and version info to the exe |
 | `packaging/sound-honter.iss` | Installer, including the right-click menu entries |
 | `tests/e2e.rs` | Runs the real app and FFmpeg, then measures the audio that comes out |

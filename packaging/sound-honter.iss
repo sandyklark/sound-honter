@@ -53,7 +53,8 @@ Source: "..\third_party\ffmpeg\LICENSE.txt"; DestDir: "{app}\ffmpeg"; Flags: ign
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
-Name: "{usersendto}\Sound Honter Mix"; Filename: "{app}\{#AppExe}"; Parameters: "mix"; WorkingDir: "{app}"
+Name: "{autoprograms}\{#AppName} Settings"; Filename: "{app}\{#AppExe}"; Parameters: "settings"
+Name: "{usersendto}\Sound Honter Mix"; Filename: "{app}\{#AppExe}"; Parameters: "mix --ask"; WorkingDir: "{app}"
 Name: "{usersendto}\Sound Honter Convert to MP3"; Filename: "{app}\{#AppExe}"; Parameters: "convert mp3"; WorkingDir: "{app}"
 
 [Registry]
@@ -83,12 +84,13 @@ Root: HKA; Subkey: "{#MenuKey}\shell\60normalize\command"; ValueType: string; Va
 Root: HKA; Subkey: "{#MenuKey}\shell\70trim"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Trim silence"
 Root: HKA; Subkey: "{#MenuKey}\shell\70trim\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" trim --queue ""%1"""
 
-Root: HKA; Subkey: "{#MenuKey}\shell\80mix"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Mix selected files"
+Root: HKA; Subkey: "{#MenuKey}\shell\80mix"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Mix..."
 Root: HKA; Subkey: "{#MenuKey}\shell\80mix"; ValueType: dword; ValueName: "CommandFlags"; ValueData: "$20"
-Root: HKA; Subkey: "{#MenuKey}\shell\80mix\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" mix --queue ""%1"""
+Root: HKA; Subkey: "{#MenuKey}\shell\80mix\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" mix --ask --queue ""%1"""
 
-Root: HKA; Subkey: "{#MenuKey}\shell\90mixoptions"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Mix with options..."
-Root: HKA; Subkey: "{#MenuKey}\shell\90mixoptions\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" mix --ask --queue ""%1"""
+Root: HKA; Subkey: "{#MenuKey}\shell\90settings"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Settings..."
+Root: HKA; Subkey: "{#MenuKey}\shell\90settings"; ValueType: dword; ValueName: "CommandFlags"; ValueData: "$20"
+Root: HKA; Subkey: "{#MenuKey}\shell\90settings\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" settings"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{localappdata}\{#AppName}"

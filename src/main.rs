@@ -2,6 +2,7 @@
 
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+mod settings_window;
 mod ui;
 
 use soundhonter::engine::{Engine, Format, MixOptions};
@@ -22,6 +23,7 @@ Usage:
   soundhonter normalize [--queue] [--no-ui] <files...>
   soundhonter trim [--queue] [--no-ui] <files...>
   soundhonter mix [--format <format>] [--no-normalize] [--ask] [--queue] [--no-ui] <files...>
+  soundhonter settings
 
   --queue         Gather files from separate launches into one job (used by the right-click menu)
   --no-ui         Report on stdout and stderr instead of showing dialogs
@@ -34,6 +36,7 @@ const EXIT_USAGE: u8 = 2;
 
 const ID_SHOW_FILE: i32 = 1001;
 const ID_LICENSES: i32 = 1002;
+const ID_SETTINGS: i32 = 1003;
 
 /// Queues `--ask` launches apart from others, since the options aren't known until after gathering.
 const ASKING_QUEUE: &str = "mix-ask";
@@ -125,6 +128,10 @@ fn main() -> ExitCode {
         }
         Some("--version") => {
             println!("Sound Honter {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
+        Some("settings") => {
+            settings_window::show(&data_dir());
             return ExitCode::SUCCESS;
         }
         Some("--help") => {
@@ -392,12 +399,15 @@ fn show_about() {
         On Windows 11, choose \"Show more options\" first.\n\n\
         Convert: right-click one or more audio files, then choose Sound Honter and a format.\n\n\
         Normalize or trim: the same, to even out loudness or cut silence from both ends.\n\n\
-        Mix: select two or more audio files, right-click, then choose Sound Honter > Mix selected files, \
-        or Mix with options to pick a format and whether to normalize. \
+        Mix: select two or more audio files, right-click, then choose Sound Honter > Mix. \
         For more than 15 files, use Send to > Sound Honter Mix.\n\n\
-        New files are saved beside the originals. Nothing is ever overwritten.";
-    let buttons = [(ID_LICENSES, "Licenses")];
-    if ui::message(ui::Icon::None, &heading, body, None, &buttons) == ID_LICENSES {
+        New files are saved beside the originals unless you choose otherwise in Settings. \
+        Nothing is ever overwritten.";
+    let buttons = [(ID_SETTINGS, "Settings"), (ID_LICENSES, "Licenses")];
+    let clicked = ui::message(ui::Icon::None, &heading, body, None, &buttons);
+    if clicked == ID_SETTINGS {
+        settings_window::show(&data_dir());
+    } else if clicked == ID_LICENSES {
         if let Some(dir) = std::env::current_exe()
             .ok()
             .and_then(|e| Some(e.parent()?.to_owned()))
