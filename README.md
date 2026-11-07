@@ -46,6 +46,23 @@ Mixes aim for -16 LUFS with peaks no higher than -3 dBTP, using one clean gain c
 a limiter. Short, punchy sounds can land a little under -16 LUFS because the peak ceiling is
 reached first.
 
+## Privacy
+
+Sound Honter doesn't collect or send any data. It never connects to the internet: everything
+happens on your PC, and the only files it writes are the new audio files beside your originals and
+its own settings in `%LOCALAPPDATA%\Sound Honter`.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
+[SignPath Foundation](https://signpath.org).
+
+- Committers and reviewers: [sandyklark](https://github.com/sandyklark)
+- Approvers: [sandyklark](https://github.com/sandyklark)
+
+Only installers built by this repository's GitHub Actions workflow, from its public source, are
+signed, and each signing request is approved by hand.
+
 ## Developing
 
 You need [rustup](https://rustup.rs) and [Inno Setup 6](https://jrsoftware.org/isinfo.php).
